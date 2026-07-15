@@ -1,10 +1,10 @@
 {
   "name": "netcine-stremio-addon",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "NetCine addon para Stremio/Nuvio",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "npx playwright install --with-deps chromium && node index.js",
     "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {
