@@ -1,6 +1,6 @@
 {
   "name": "netcine-stremio-addon",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "NetCine addon para Stremio/Nuvio",
   "main": "index.js",
   "scripts": {
