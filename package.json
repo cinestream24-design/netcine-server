@@ -4,8 +4,7 @@
   "description": "NetCine addon para Stremio/Nuvio",
   "main": "index.js",
   "scripts": {
-    "start": "npx playwright install --with-deps chromium && node index.js",
-    "postinstall": "npx playwright install --with-deps chromium"
+    "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
