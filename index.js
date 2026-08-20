@@ -3,11 +3,12 @@ const express = require('express');
 const PORT = process.env.PORT || 8080;
 const app = express();
 
-const TMDB_KEY = process.env.TMDB_KEY || 'd8e8e85d692358d3b5db2cfd08487457';
+const TMDB_KEY = process.env.TMDB_KEY;
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 
 const LANGUAGE = 'pt-BR';
 const REGION = 'BR';
+const PAGE_SIZE = 20;
 
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -22,7 +23,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// SERVIÇOS DE STREAMING
+// SERVIÇOS DE STREAMING DISPONÍVEIS NO BRASIL
 // ============================================================
 
 const PROVIDERS = [
@@ -71,60 +72,19 @@ const PROVIDERS = [
 ];
 
 // ============================================================
-// GÊNEROS
-// ============================================================
-
-const GENRES = {
-    movie: [
-        ['all', 'Todos'],
-        ['28', 'Ação'],
-        ['12', 'Aventura'],
-        ['16', 'Animação'],
-        ['35', 'Comédia'],
-        ['80', 'Crime'],
-        ['99', 'Documentário'],
-        ['18', 'Drama'],
-        ['10751', 'Família'],
-        ['14', 'Fantasia'],
-        ['27', 'Terror'],
-        ['878', 'Ficção científica'],
-        ['53', 'Thriller']
-    ],
-
-    series: [
-        ['all', 'Todos'],
-        ['10759', 'Ação e aventura'],
-        ['16', 'Animação'],
-        ['35', 'Comédia'],
-        ['80', 'Crime'],
-        ['99', 'Documentário'],
-        ['18', 'Drama'],
-        ['10751', 'Família'],
-        ['10762', 'Infantil'],
-        ['9648', 'Mistério'],
-        ['10765', 'Ficção científica e fantasia'],
-        ['10768', 'Guerra e política']
-    ]
-};
-
-// ============================================================
 // MANIFEST
-// SOMENTE CATÁLOGO
+// SOMENTE CATÁLOGOS
 // ============================================================
 
 const catalogs = [];
 
 for (const provider of PROVIDERS) {
+
     catalogs.push({
         id: `${provider.id}_movie`,
         type: 'movie',
-        name: `${provider.name} • Filmes`,
+        name: `${provider.name} Filmes`,
         extra: [
-            {
-                name: 'genre',
-                isRequired: false,
-                options: GENRES.movie.map(item => item[1])
-            },
             {
                 name: 'skip',
                 isRequired: false
@@ -135,13 +95,8 @@ for (const provider of PROVIDERS) {
     catalogs.push({
         id: `${provider.id}_series`,
         type: 'series',
-        name: `${provider.name} • Séries`,
+        name: `${provider.name} Séries`,
         extra: [
-            {
-                name: 'genre',
-                isRequired: false,
-                options: GENRES.series.map(item => item[1])
-            },
             {
                 name: 'skip',
                 isRequired: false
@@ -152,9 +107,9 @@ for (const provider of PROVIDERS) {
 
 const MANIFEST = {
     id: 'br.netcine.catalog',
-    version: '2.1.2',
+    version: '2.2.0',
     name: 'NetCine',
-    description: 'Catálogo de filmes e séries organizado por serviços de streaming.',
+    description: 'Catálogo brasileiro de filmes e séries organizado por serviço de streaming.',
     logo: PROVIDERS[0].logo,
 
     resources: [
@@ -170,19 +125,25 @@ const MANIFEST = {
 };
 
 // ============================================================
-// ROTAS BÁSICAS
+// ROTA PRINCIPAL
 // ============================================================
 
 app.get('/', (req, res) => {
+
     res.json({
         name: 'NetCine',
         status: 'online',
+        version: MANIFEST.version,
         mode: 'catalog-only',
-        resources: ['catalog'],
         region: REGION,
+        language: LANGUAGE,
         providers: PROVIDERS.map(provider => provider.name)
     });
 });
+
+// ============================================================
+// MANIFEST
+// ============================================================
 
 app.get('/manifest.json', (req, res) => {
     res.json(MANIFEST);
@@ -198,6 +159,10 @@ const CACHE_TTL = 10 * 60 * 1000;
 
 async function tmdb(path, params = {}) {
 
+    if (!TMDB_KEY) {
+        throw new Error('TMDB_KEY não configurada');
+    }
+
     const query = new URLSearchParams({
         api_key: TMDB_KEY,
         language: LANGUAGE,
@@ -208,7 +173,10 @@ async function tmdb(path, params = {}) {
 
     const cached = cache.get(url);
 
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    if (
+        cached &&
+        Date.now() - cached.timestamp < CACHE_TTL
+    ) {
         return cached.data;
     }
 
@@ -246,87 +214,6 @@ function image(path, size = 'w500') {
 }
 
 // ============================================================
-// GÊNERO
-// Converte o nome recebido pelo Nuvio para o ID do TMDB
-// ============================================================
-
-function getGenreId(type, value) {
-
-    if (!value) {
-        return 'all';
-    }
-
-    const normalized = String(value)
-        .trim()
-        .toLowerCase();
-
-    const genres = GENRES[type] || [];
-
-    const found = genres.find(item =>
-        item[0].toLowerCase() === normalized ||
-        item[1].toLowerCase() === normalized
-    );
-
-    return found ? found[0] : 'all';
-}
-
-// ============================================================
-// METADADOS
-// ============================================================
-
-function toMeta(item, type, provider) {
-
-    const title = type === 'movie'
-        ? item.title
-        : item.name;
-
-    const originalTitle = type === 'movie'
-        ? item.original_title
-        : item.original_name;
-
-    const date = type === 'movie'
-        ? item.release_date
-        : item.first_air_date;
-
-    return {
-        id: `tmdb:${item.id}`,
-
-        type,
-
-        name: title || originalTitle || 'Sem título',
-
-        poster: image(item.poster_path, 'w500'),
-
-        background: image(item.backdrop_path, 'w1280'),
-
-        description: item.overview || '',
-
-        releaseInfo: date
-            ? date.substring(0, 4)
-            : '',
-
-        imdbRating:
-            typeof item.vote_average === 'number'
-                ? Number(item.vote_average.toFixed(1))
-                : undefined,
-
-        genres: Array.isArray(item.genre_ids)
-            ? item.genre_ids
-            : [],
-
-        posterShape: 'poster',
-
-        behaviorHints: {
-            defaultVideoId: `tmdb:${item.id}`
-        },
-
-        netcineProvider: provider.id,
-
-        netcineProviderName: provider.name
-    };
-}
-
-// ============================================================
 // PROVIDER
 // ============================================================
 
@@ -335,6 +222,74 @@ function getProvider(providerId) {
     return PROVIDERS.find(
         provider => provider.id === providerId
     );
+}
+
+// ============================================================
+// METADATA
+// ============================================================
+
+function toMeta(item, type, provider) {
+
+    const isMovie = type === 'movie';
+
+    const title = isMovie
+        ? item.title
+        : item.name;
+
+    const originalTitle = isMovie
+        ? item.original_title
+        : item.original_name;
+
+    const date = isMovie
+        ? item.release_date
+        : item.first_air_date;
+
+    return {
+        id: `tmdb:${item.id}`,
+
+        type,
+
+        name:
+            title ||
+            originalTitle ||
+            'Sem título',
+
+        poster:
+            image(item.poster_path, 'w500'),
+
+        background:
+            image(item.backdrop_path, 'w1280'),
+
+        description:
+            item.overview || '',
+
+        releaseInfo:
+            date
+                ? date.substring(0, 4)
+                : '',
+
+        imdbRating:
+            typeof item.vote_average === 'number'
+                ? Number(item.vote_average.toFixed(1))
+                : undefined,
+
+        genres:
+            Array.isArray(item.genre_ids)
+                ? item.genre_ids
+                : [],
+
+        posterShape: 'poster',
+
+        behaviorHints: {
+            defaultVideoId: `tmdb:${item.id}`
+        },
+
+        netcineProvider:
+            provider.id,
+
+        netcineProviderName:
+            provider.name
+    };
 }
 
 // ============================================================
@@ -348,34 +303,68 @@ async function catalogHandler(req, res) {
 
     const provider = getProvider(providerId);
 
+    // --------------------------------------------------------
+    // VALIDAÇÃO
+    // --------------------------------------------------------
+
     if (
         !provider ||
         (type !== 'movie' && type !== 'series')
     ) {
+
         return res.json({
             metas: []
         });
     }
 
-    const skip = Math.max(
-        0,
-        parseInt(req.query.skip || '0', 10) || 0
-    );
+    // --------------------------------------------------------
+    // PAGINAÇÃO
+    // --------------------------------------------------------
 
-    const requestedGenre =
-        req.query.genre || 'all';
-
-    const genre = getGenreId(
-        type,
-        requestedGenre
-    );
+    const skip =
+        Math.max(
+            0,
+            parseInt(
+                req.query.skip || '0',
+                10
+            ) || 0
+        );
 
     const page =
-        Math.floor(skip / 20) + 1;
+        Math.floor(skip / PAGE_SIZE) + 1;
+
+    // --------------------------------------------------------
+    // CAMINHO TMDB
+    // --------------------------------------------------------
+
+    const path =
+        type === 'movie'
+            ? '/discover/movie'
+            : '/discover/tv';
+
+    // --------------------------------------------------------
+    // ORDENAÇÃO
+    //
+    // FILMES:
+    // lançamento mais recente primeiro
+    //
+    // SÉRIES:
+    // primeira exibição mais recente primeiro
+    // --------------------------------------------------------
+
+    const sortBy =
+        type === 'movie'
+            ? 'primary_release_date.desc'
+            : 'first_air_date.desc';
+
+    // --------------------------------------------------------
+    // PARÂMETROS
+    // --------------------------------------------------------
 
     const params = {
 
-        watch_region: REGION,
+        watch_region:
+            REGION,
 
         with_watch_providers:
             String(provider.tmdbId),
@@ -384,41 +373,65 @@ async function catalogHandler(req, res) {
             'flatrate',
 
         sort_by:
-            'popularity.desc',
+            sortBy,
 
         page:
-            String(page)
+            String(page),
+
+        include_adult:
+            'false'
     };
 
-    if (genre !== 'all') {
-        params.with_genres = genre;
-    }
+    // ========================================================
+    // BUSCA TMDB
+    // ========================================================
 
     try {
 
-        const path =
-            type === 'movie'
-                ? '/discover/movie'
-                : '/discover/tv';
-
-        const data = await tmdb(
-            path,
-            params
+        console.log(
+            `[NetCine] ${provider.name} ${type} | página ${page} | ${sortBy}`
         );
+
+        const data =
+            await tmdb(
+                path,
+                params
+            );
 
         const results =
             Array.isArray(data.results)
                 ? data.results
                 : [];
 
+        // ----------------------------------------------------
+        // CONVERTE RESULTADOS
+        // ----------------------------------------------------
+
         const metas =
-            results.map(item =>
-                toMeta(
-                    item,
-                    type,
-                    provider
-                )
-            );
+            results
+                .filter(item => {
+
+                    if (type === 'movie') {
+                        return Boolean(
+                            item.release_date
+                        );
+                    }
+
+                    return Boolean(
+                        item.first_air_date
+                    );
+                })
+                .map(item =>
+                    toMeta(
+                        item,
+                        type,
+                        provider
+                    )
+                );
+
+        console.log(
+            `[NetCine] ${provider.name} ${type}: ${metas.length} títulos`
+        );
 
         return res.json({
             metas
@@ -438,13 +451,24 @@ async function catalogHandler(req, res) {
 }
 
 // ============================================================
-// ROTAS DE CATÁLOGO
+// ROTAS DOS CATÁLOGOS
 // ============================================================
+
+// Exemplo:
+//
+// /catalog/movie/netflix.json
+// /catalog/series/netflix.json
+//
+// /catalog/movie/netflix.json?skip=20
+// /catalog/series/netflix.json?skip=20
 
 app.get(
     '/catalog/:type/:provider.json',
     catalogHandler
 );
+
+// Compatibilidade com clientes que enviam parâmetros
+// no segmento extra da URL.
 
 app.get(
     '/catalog/:type/:provider/:extra.json',
@@ -459,7 +483,10 @@ setInterval(() => {
 
     const now = Date.now();
 
-    for (const [key, value] of cache.entries()) {
+    for (
+        const [key, value]
+        of cache.entries()
+    ) {
 
         if (
             now - value.timestamp >
@@ -480,18 +507,25 @@ app.listen(PORT, () => {
     console.log('========================================');
     console.log('NetCine Catálogo iniciado');
     console.log('Porta:', PORT);
+    console.log('Versão:', MANIFEST.version);
     console.log('Modo: SOMENTE CATÁLOGO');
     console.log('Região:', REGION);
+    console.log('Idioma:', LANGUAGE);
+
     console.log(
         'TMDB_KEY:',
-        TMDB_KEY ? 'CONFIGURADA' : 'AUSENTE'
+        TMDB_KEY
+            ? 'CONFIGURADA'
+            : 'AUSENTE'
     );
+
     console.log(
         'Serviços:',
         PROVIDERS
             .map(provider => provider.name)
             .join(', ')
     );
+
     console.log('========================================');
 
 });
