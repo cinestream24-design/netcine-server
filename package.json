@@ -1,0 +1,16 @@
+{
+  "name": "netcine-catalog-addon",
+  "version": "2.1.1",
+  "description": "NetCine: addon somente de catálogo para Nuvio/Stremio, organizado por serviços de streaming.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js"
+  },
+  "dependencies": {
+    "express": "4.21.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
