@@ -3,17 +3,47 @@ const express = require('express');
 const PORT = process.env.PORT || 8080;
 const app = express();
 
-const TMDB_KEY = process.env.TMDB_KEY;
-const TMDB_BASE = 'https://api.themoviedb.org/3';
+const TMDB_KEY =
+    process.env.TMDB_KEY ||
+    'd8e8e85d692358d3b5db2cfd08487457';
+
+const TMDB_BASE =
+    'https://api.themoviedb.org/3';
 
 const LANGUAGE = 'pt-BR';
 const REGION = 'BR';
+
 const PAGE_SIZE = 20;
 
+// Quantas páginas do TMDB serão analisadas
+// para montar uma página do catálogo.
+// 3 páginas = até 60 títulos analisados.
+const FETCH_PAGES = 3;
+
+// Cache
+const CACHE_TTL =
+    10 * 60 * 1000;
+
+// ============================================================
+// EXPRESS
+// ============================================================
+
 app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+
+    res.setHeader(
+        'Access-Control-Allow-Origin',
+        '*'
+    );
+
+    res.setHeader(
+        'Access-Control-Allow-Headers',
+        '*'
+    );
+
+    res.setHeader(
+        'Access-Control-Allow-Methods',
+        'GET, OPTIONS'
+    );
 
     if (req.method === 'OPTIONS') {
         return res.sendStatus(204);
@@ -23,52 +53,67 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// SERVIÇOS DE STREAMING
+// STREAMINGS
 // ============================================================
 
 const PROVIDERS = [
+
     {
         id: 'netflix',
         name: 'Netflix',
         tmdbId: 8,
-        logo: 'https://image.tmdb.org/t/p/original/t2yyOv40HZeVlLjYsCsPHnWLk4W.jpg'
+        logo:
+            'https://image.tmdb.org/t/p/original/t2yyOv40HZeVlLjYsCsPHnWLk4W.jpg'
     },
+
     {
         id: 'disney_plus',
         name: 'Disney+',
         tmdbId: 337,
-        logo: 'https://image.tmdb.org/t/p/original/7rwgEs15tFwyR9NPQ5vpzxTj19Q.jpg'
+        logo:
+            'https://image.tmdb.org/t/p/original/7rwgEs15tFwyR9NPQ5vpzxTj19Q.jpg'
     },
+
     {
         id: 'prime_video',
         name: 'Prime Video',
         tmdbId: 119,
-        logo: 'https://image.tmdb.org/t/p/original/emthp39XA2YScoYL1p0sdbAH2WA.jpg'
+        logo:
+            'https://image.tmdb.org/t/p/original/emthp39XA2YScoYL1p0sdbAH2WA.jpg'
     },
+
     {
         id: 'max',
         name: 'Max',
         tmdbId: 1899,
-        logo: 'https://image.tmdb.org/t/p/original/6AK8H0dHnX6cV3aK1mQmFJYQf8H.jpg'
+        logo:
+            'https://image.tmdb.org/t/p/original/6AK8H0dHnX6cV3aK1mQmFJYQf8H.jpg'
     },
+
     {
         id: 'apple_tv_plus',
         name: 'Apple TV+',
         tmdbId: 350,
-        logo: 'https://image.tmdb.org/t/p/original/peURlLlr8jggOwK53fJ5wdQl05y.jpg'
+        logo:
+            'https://image.tmdb.org/t/p/original/peURlLlr8jggOwK53fJ5wdQl05y.jpg'
     },
+
     {
         id: 'paramount_plus',
         name: 'Paramount+',
         tmdbId: 531,
-        logo: 'https://image.tmdb.org/t/p/original/xbhHHa1YgtpwhC8lb1NQ3ACVcLd.jpg'
+        logo:
+            'https://image.tmdb.org/t/p/original/xbhHHa1YgtpwhC8lb1NQ3ACVcLd.jpg'
     },
+
     {
         id: 'globoplay',
         name: 'Globoplay',
         tmdbId: 307,
-        logo: 'https://image.tmdb.org/t/p/original/7fT8r6D1qjK3xT8l2K3yX9w1s0A.jpg'
+        logo:
+            'https://image.tmdb.org/t/p/original/7fT8r6D1qjK3xT8l2K3yX9w1s0A.jpg'
     }
+
 ];
 
 // ============================================================
@@ -79,38 +124,66 @@ const catalogs = [];
 
 for (const provider of PROVIDERS) {
 
+    // FILMES
     catalogs.push({
-        id: `${provider.id}_movie`,
-        type: 'movie',
-        name: `${provider.name} Filmes`,
+
+        id:
+            `${provider.id}_movie`,
+
+        type:
+            'movie',
+
+        name:
+            `${provider.name} Filmes`,
+
         extra: [
             {
                 name: 'skip',
                 isRequired: false
             }
         ]
+
     });
 
+    // SÉRIES
     catalogs.push({
-        id: `${provider.id}_series`,
-        type: 'series',
-        name: `${provider.name} Séries`,
+
+        id:
+            `${provider.id}_series`,
+
+        type:
+            'series',
+
+        name:
+            `${provider.name} Séries`,
+
         extra: [
             {
                 name: 'skip',
                 isRequired: false
             }
         ]
+
     });
+
 }
 
 const MANIFEST = {
-    id: 'br.netcine.catalog',
-    version: '2.2.1',
-    name: 'NetCine',
+
+    id:
+        'br.netcine.catalog',
+
+    version:
+        '2.3.0',
+
+    name:
+        'NetCine',
+
     description:
-        'Catálogo brasileiro de filmes e séries organizado por serviço de streaming.',
-    logo: PROVIDERS[0].logo,
+        'Catálogo brasileiro de filmes e séries organizado por serviço de streaming e lançamento.',
+
+    logo:
+        PROVIDERS[0].logo,
 
     resources: [
         'catalog'
@@ -122,121 +195,126 @@ const MANIFEST = {
     ],
 
     catalogs
+
 };
 
 // ============================================================
-// ROTAS BÁSICAS
-// ============================================================
-
-app.get('/', (req, res) => {
-
-    res.json({
-        name: 'NetCine',
-        status: 'online',
-        version: MANIFEST.version,
-        mode: 'catalog-only',
-        region: REGION,
-        language: LANGUAGE,
-        providers: PROVIDERS.map(
-            provider => provider.name
-        )
-    });
-});
-
-app.get('/manifest.json', (req, res) => {
-    res.json(MANIFEST);
-});
-
-// ============================================================
-// CACHE
+// CACHE TMDB
 // ============================================================
 
 const cache = new Map();
 
-const CACHE_TTL = 10 * 60 * 1000;
-
 async function tmdb(path, params = {}) {
 
-    if (!TMDB_KEY) {
-        throw new Error(
-            'TMDB_KEY não configurada no servidor'
-        );
-    }
+    const query =
+        new URLSearchParams({
 
-    const query = new URLSearchParams({
-        api_key: TMDB_KEY,
-        language: LANGUAGE,
-        ...params
-    });
+            api_key:
+                TMDB_KEY,
+
+            language:
+                LANGUAGE,
+
+            ...params
+
+        });
 
     const url =
         `${TMDB_BASE}${path}?${query.toString()}`;
 
-    const cached = cache.get(url);
+    const cached =
+        cache.get(url);
 
     if (
         cached &&
-        Date.now() - cached.timestamp < CACHE_TTL
+        Date.now() - cached.timestamp <
+            CACHE_TTL
     ) {
+
         return cached.data;
+
     }
 
-    const response = await fetch(url, {
-        headers: {
-            Accept: 'application/json'
-        }
-    });
+    /*
+     * Node 18 possui fetch nativo.
+     *
+     * Isso elimina a necessidade do node-fetch
+     * que estava causando o crash anteriormente.
+     */
+
+    const response =
+        await fetch(url, {
+
+            headers: {
+                Accept:
+                    'application/json'
+            }
+
+        });
 
     if (!response.ok) {
+
         throw new Error(
             `TMDB HTTP ${response.status}`
         );
+
     }
 
-    const data = await response.json();
+    const data =
+        await response.json();
 
-    cache.set(url, {
-        data,
-        timestamp: Date.now()
-    });
+    cache.set(
+
+        url,
+
+        {
+            data,
+            timestamp:
+                Date.now()
+        }
+
+    );
 
     return data;
+
 }
 
 // ============================================================
 // IMAGENS
 // ============================================================
 
-function image(path, size = 'w500') {
+function image(
+    path,
+    size = 'w500'
+) {
 
     if (!path) {
         return null;
     }
 
-    return `https://image.tmdb.org/t/p/${size}${path}`;
+    return (
+        `https://image.tmdb.org/t/p/${size}${path}`
+    );
+
 }
 
 // ============================================================
 // PROVIDER
 // ============================================================
 
-function getProvider(providerId) {
+function getProvider(
+    providerId
+) {
 
     return PROVIDERS.find(
-        provider => provider.id === providerId
+        provider =>
+            provider.id === providerId
     );
+
 }
 
 // ============================================================
-// EXTRAI SKIP
-//
-// Aceita:
-//
-// ?skip=20
-//
-// /catalog/movie/netflix/skip=20.json
-//
-// /catalog/movie/netflix/20.json
+// SKIP
 // ============================================================
 
 function getSkip(req) {
@@ -257,8 +335,11 @@ function getSkip(req) {
             Number.isFinite(value) &&
             value >= 0
         ) {
+
             return value;
+
         }
+
     }
 
     const extra =
@@ -271,16 +352,16 @@ function getSkip(req) {
                 String(extra)
             );
 
-        const skipMatch =
+        const match =
             decoded.match(
-                /(?:^|[&;,])skip[=:](\d+)/i
+                /skip[=:](\d+)/i
             );
 
-        if (skipMatch) {
+        if (match) {
 
             const value =
                 parseInt(
-                    skipMatch[1],
+                    match[1],
                     10
                 );
 
@@ -288,75 +369,73 @@ function getSkip(req) {
                 Number.isFinite(value) &&
                 value >= 0
             ) {
+
                 return value;
+
             }
+
         }
 
-        const onlyNumber =
-            decoded.match(
-                /^(\d+)$/
+        if (
+            /^\d+$/.test(decoded)
+        ) {
+
+            return parseInt(
+                decoded,
+                10
             );
 
-        if (onlyNumber) {
-
-            const value =
-                parseInt(
-                    onlyNumber[1],
-                    10
-                );
-
-            if (
-                Number.isFinite(value) &&
-                value >= 0
-            ) {
-                return value;
-            }
         }
+
     }
 
     return 0;
+
 }
 
 // ============================================================
-// DATA DO TÍTULO
+// DATA DE LANÇAMENTO
 // ============================================================
 
-function getReleaseDate(item, type) {
+function getReleaseDate(
+    item,
+    type
+) {
 
     if (type === 'movie') {
-        return item.release_date || '';
+
+        return (
+            item.release_date ||
+            ''
+        );
+
     }
 
-    return item.first_air_date || '';
+    return (
+        item.first_air_date ||
+        ''
+    );
+
 }
 
 // ============================================================
-// ORDENAÇÃO REAL
+// ORDENAÇÃO
 //
-// O TMDB já manda ordenado.
+// MAIS NOVO PRIMEIRO
 //
-// Mesmo assim nós ordenamos novamente aqui,
-// antes de enviar para o Nuvio.
-//
-// Mais recente primeiro.
+// YYYY-MM-DD
+// YYYY-MM-DD
+// YYYY-MM-DD
+// ...
 // ============================================================
 
-function sortByReleaseDate(results, type) {
+function sortByReleaseDate(
+    items,
+    type
+) {
 
-    return results
-        .filter(item => {
-
-            const date =
-                getReleaseDate(
-                    item,
-                    type
-                );
-
-            return /^\d{4}-\d{2}-\d{2}$/.test(
-                date
-            );
-        })
-        .sort((a, b) => {
+    return items.sort(
+        (a, b) => {
 
             const dateA =
                 getReleaseDate(
@@ -370,30 +449,226 @@ function sortByReleaseDate(results, type) {
                     type
                 );
 
-            // Mais recente primeiro
-            const comparison =
-                dateB.localeCompare(dateA);
+            // Sem data vai para o final
+            if (!dateA && !dateB) {
+                return 0;
+            }
 
-            if (comparison !== 0) {
-                return comparison;
+            if (!dateA) {
+                return 1;
+            }
+
+            if (!dateB) {
+                return -1;
+            }
+
+            // Mais recente primeiro
+            if (
+                dateA !== dateB
+            ) {
+
+                return dateB.localeCompare(
+                    dateA
+                );
+
             }
 
             // Desempate por popularidade
             const popularityA =
-                Number(a.popularity || 0);
+                Number(
+                    a.popularity || 0
+                );
 
             const popularityB =
-                Number(b.popularity || 0);
+                Number(
+                    b.popularity || 0
+                );
 
-            return popularityB - popularityA;
-        });
+            return (
+                popularityB -
+                popularityA
+            );
+
+        }
+    );
+
 }
 
 // ============================================================
-// METADATA
+// REMOVER DUPLICADOS
 // ============================================================
 
-function toMeta(item, type, provider) {
+function removeDuplicates(
+    items
+) {
+
+    const seen =
+        new Set();
+
+    return items.filter(
+        item => {
+
+            const id =
+                String(
+                    item.id
+                );
+
+            if (
+                seen.has(id)
+            ) {
+
+                return false;
+
+            }
+
+            seen.add(id);
+
+            return true;
+
+        }
+    );
+
+}
+
+// ============================================================
+// BUSCA ORDENADA
+//
+// O TMDB já oferece sort_by por data.
+// Nós buscamos várias páginas e fazemos
+// uma segunda ordenação local.
+//
+// Isso evita depender somente da ordem
+// retornada pela API.
+// ============================================================
+
+async function getOrderedCatalog(
+    type,
+    provider,
+    requestedPage
+) {
+
+    const path =
+        type === 'movie'
+            ? '/discover/movie'
+            : '/discover/tv';
+
+    const sortBy =
+        type === 'movie'
+            ? 'primary_release_date.desc'
+            : 'first_air_date.desc';
+
+    /*
+     * Para cada página pedida pelo Nuvio,
+     * analisamos algumas páginas do TMDB.
+     *
+     * Exemplo:
+     *
+     * skip=0
+     * -> páginas 1,2,3
+     *
+     * skip=20
+     * -> páginas 1,2,3,4
+     *
+     * Isso permite manter uma ordenação global
+     * dentro do conjunto analisado.
+     */
+
+    const lastPageNeeded =
+        Math.max(
+            FETCH_PAGES,
+            requestedPage + 1
+        );
+
+    const pages = [];
+
+    for (
+        let page = 1;
+        page <= lastPageNeeded;
+        page++
+    ) {
+
+        pages.push(
+            tmdb(
+                path,
+                {
+
+                    watch_region:
+                        REGION,
+
+                    with_watch_providers:
+                        String(
+                            provider.tmdbId
+                        ),
+
+                    with_watch_monetization_types:
+                        'flatrate',
+
+                    sort_by:
+                        sortBy,
+
+                    page:
+                        String(page),
+
+                    include_adult:
+                        'false'
+
+                }
+            )
+        );
+
+    }
+
+    const responses =
+        await Promise.all(
+            pages
+        );
+
+    let results = [];
+
+    for (
+        const data of responses
+    ) {
+
+        if (
+            Array.isArray(
+                data.results
+            )
+        ) {
+
+            results.push(
+                ...data.results
+            );
+
+        }
+
+    }
+
+    // Remove duplicados
+    results =
+        removeDuplicates(
+            results
+        );
+
+    // Ordena novamente
+    results =
+        sortByReleaseDate(
+            results,
+            type
+        );
+
+    return results;
+
+}
+
+// ============================================================
+// META
+// ============================================================
+
+function toMeta(
+    item,
+    type,
+    provider
+) {
 
     const isMovie =
         type === 'movie';
@@ -408,7 +683,7 @@ function toMeta(item, type, provider) {
             ? item.original_title
             : item.original_name;
 
-    const date =
+    const releaseDate =
         getReleaseDate(
             item,
             type
@@ -441,20 +716,32 @@ function toMeta(item, type, provider) {
         description:
             item.overview || '',
 
+        /*
+         * O Nuvio continua vendo somente
+         * o ano.
+         */
         releaseInfo:
-            date
-                ? date.substring(0, 4)
+            releaseDate
+                ? releaseDate.substring(
+                    0,
+                    4
+                )
                 : '',
 
         imdbRating:
-            typeof item.vote_average === 'number'
+            typeof item.vote_average ===
+                'number'
                 ? Number(
-                    item.vote_average.toFixed(1)
+                    item.vote_average.toFixed(
+                        1
+                    )
                 )
                 : undefined,
 
         genres:
-            Array.isArray(item.genre_ids)
+            Array.isArray(
+                item.genre_ids
+            )
                 ? item.genre_ids
                 : [],
 
@@ -462,8 +749,10 @@ function toMeta(item, type, provider) {
             'poster',
 
         behaviorHints: {
+
             defaultVideoId:
                 `tmdb:${item.id}`
+
         },
 
         netcineProvider:
@@ -471,14 +760,19 @@ function toMeta(item, type, provider) {
 
         netcineProviderName:
             provider.name
+
     };
+
 }
 
 // ============================================================
 // CATÁLOGO
 // ============================================================
 
-async function catalogHandler(req, res) {
+async function catalogHandler(
+    req,
+    res
+) {
 
     const type =
         req.params.type;
@@ -506,6 +800,7 @@ async function catalogHandler(req, res) {
         return res.json({
             metas: []
         });
+
     }
 
     // --------------------------------------------------------
@@ -515,204 +810,109 @@ async function catalogHandler(req, res) {
     const skip =
         getSkip(req);
 
-    const page =
+    const requestedPage =
         Math.floor(
             skip / PAGE_SIZE
         ) + 1;
 
-    // --------------------------------------------------------
-    // ENDPOINT TMDB
-    // --------------------------------------------------------
-
-    const path =
-        type === 'movie'
-            ? '/discover/movie'
-            : '/discover/tv';
-
-    // --------------------------------------------------------
-    // ORDENAÇÃO TMDB
-    // --------------------------------------------------------
-
-    const sortBy =
-        type === 'movie'
-            ? 'primary_release_date.desc'
-            : 'first_air_date.desc';
-
-    // --------------------------------------------------------
-    // PARÂMETROS
-    // --------------------------------------------------------
-
-    const params = {
-
-        watch_region:
-            REGION,
-
-        with_watch_providers:
-            String(
-                provider.tmdbId
-            ),
-
-        with_watch_monetization_types:
-            'flatrate',
-
-        sort_by:
-            sortBy,
-
-        page:
-            String(page),
-
-        include_adult:
-            'false'
-    };
-
-    // Para filmes, o Brasil também é usado
-    // para considerar a data regional.
-    if (type === 'movie') {
-
-        params.region =
-            REGION;
-    }
-
-    // ========================================================
-    // CONSULTA
-    // ========================================================
+    console.log(
+        `[NetCine] ${provider.name} ${type} | skip=${skip} | página=${requestedPage}`
+    );
 
     try {
 
-        console.log(
-            `[NetCine] Buscando ${provider.name} ${type}`
-        );
-
-        console.log(
-            `[NetCine] Página: ${page}`
-        );
-
-        console.log(
-            `[NetCine] Skip: ${skip}`
-        );
-
-        console.log(
-            `[NetCine] Ordenação: ${sortBy}`
-        );
-
-        const data =
-            await tmdb(
-                path,
-                params
-            );
+        // ----------------------------------------------------
+        // BUSCAR E ORDENAR
+        // ----------------------------------------------------
 
         let results =
-            Array.isArray(
-                data.results
-            )
-                ? data.results
-                : [];
-
-        // ====================================================
-        // ORDENAÇÃO LOCAL
-        // ====================================================
-
-        results =
-            sortByReleaseDate(
-                results,
-                type
+            await getOrderedCatalog(
+                type,
+                provider,
+                requestedPage
             );
 
-        // ====================================================
-        // REMOVE DUPLICADOS
-        // ====================================================
+        // ----------------------------------------------------
+        // POSIÇÃO DA PÁGINA
+        // ----------------------------------------------------
 
-        const seen =
-            new Set();
+        const start =
+            skip;
 
-        results =
-            results.filter(item => {
+        const end =
+            start + PAGE_SIZE;
 
-                if (
-                    seen.has(
-                        item.id
-                    )
-                ) {
-                    return false;
-                }
+        const pageResults =
+            results.slice(
+                start,
+                end
+            );
 
-                seen.add(
-                    item.id
-                );
-
-                return true;
-            });
-
-        // ====================================================
-        // TRANSFORMA PARA NUVIO
-        // ====================================================
+        // ----------------------------------------------------
+        // TRANSFORMAR
+        // ----------------------------------------------------
 
         const metas =
-            results
-                .map(item =>
+            pageResults.map(
+                item =>
                     toMeta(
                         item,
                         type,
                         provider
                     )
-                );
+            );
 
-        // ====================================================
+        // ----------------------------------------------------
         // LOG
-        // ====================================================
+        // ----------------------------------------------------
 
-        if (metas.length > 0) {
+        console.log(
+            `[NetCine] ${provider.name} ${type}: ${metas.length} títulos`
+        );
 
-            const first =
-                metas[0];
-
-            const last =
-                metas[
-                    metas.length - 1
-                ];
+        if (
+            metas.length > 0
+        ) {
 
             console.log(
-                `[NetCine] ${provider.name} ${type}: ${metas.length} títulos`
+                `[NetCine] PRIMEIRO: ${metas[0].name} - ${metas[0].releaseInfo}`
             );
 
             console.log(
-                `[NetCine] Primeiro: ${first.name} (${first.releaseInfo})`
+                `[NetCine] ÚLTIMO: ${metas[metas.length - 1].name} - ${metas[metas.length - 1].releaseInfo}`
             );
 
-            console.log(
-                `[NetCine] Último: ${last.name} (${last.releaseInfo})`
-            );
-
-        } else {
-
-            console.log(
-                `[NetCine] ${provider.name} ${type}: nenhum resultado`
-            );
         }
 
-        // ====================================================
+        // ----------------------------------------------------
         // RESPOSTA
-        // ====================================================
+        // ----------------------------------------------------
 
         return res.json({
+
             metas
+
         });
 
     } catch (error) {
 
         console.error(
-            '[NetCine] Erro TMDB:',
+            '[NetCine] ERRO:',
             error.message
         );
 
         return res.json({
+
             metas: []
+
         });
+
     }
+
 }
 
 // ============================================================
-// ROTAS
+// ROTAS DE CATÁLOGO
 // ============================================================
 
 app.get(
@@ -729,31 +929,111 @@ app.get(
 // LIMPEZA DO CACHE
 // ============================================================
 
-setInterval(() => {
+setInterval(
+    () => {
 
-    const now =
-        Date.now();
+        const now =
+            Date.now();
 
-    for (
-        const [
-            key,
-            value
-        ]
-        of cache.entries()
-    ) {
-
-        if (
-            now - value.timestamp >
-            CACHE_TTL
+        for (
+            const [
+                key,
+                value
+            ]
+                of cache.entries()
         ) {
 
-            cache.delete(
-                key
-            );
-        }
-    }
+            if (
+                now -
+                value.timestamp >
+                CACHE_TTL
+            ) {
 
-}, 5 * 60 * 1000);
+                cache.delete(
+                    key
+                );
+
+            }
+
+        }
+
+    },
+    5 * 60 * 1000
+);
+
+// ============================================================
+// HOME
+// ============================================================
+
+app.get(
+    '/',
+    (req, res) => {
+
+        res.json({
+
+            name:
+                'NetCine',
+
+            status:
+                'online',
+
+            version:
+                MANIFEST.version,
+
+            mode:
+                'catalog-only',
+
+            region:
+                REGION,
+
+            language:
+                LANGUAGE,
+
+            providers:
+                PROVIDERS.map(
+                    provider =>
+                        provider.name
+                )
+
+        });
+
+    }
+);
+
+// ============================================================
+// MANIFEST
+// ============================================================
+
+app.get(
+    '/manifest.json',
+    (req, res) => {
+
+        res.json(
+            MANIFEST
+        );
+
+    }
+);
+
+// ============================================================
+// ERRO 404
+// ============================================================
+
+app.use(
+    (req, res) => {
+
+        res.status(404).json({
+
+            error:
+                'Endpoint não encontrado',
+
+            path:
+                req.path
+
+        });
+
+    }
+);
 
 // ============================================================
 // SERVIDOR
@@ -768,12 +1048,7 @@ app.listen(
         );
 
         console.log(
-            'NetCine Catálogo iniciado'
-        );
-
-        console.log(
-            'Porta:',
-            PORT
+            'NetCine iniciado'
         );
 
         console.log(
@@ -782,7 +1057,13 @@ app.listen(
         );
 
         console.log(
-            'Modo: SOMENTE CATÁLOGO'
+            'Porta:',
+            PORT
+        );
+
+        console.log(
+            'Modo:',
+            'CATÁLOGO'
         );
 
         console.log(
@@ -796,14 +1077,14 @@ app.listen(
         );
 
         console.log(
-            'TMDB_KEY:',
+            'TMDB:',
             TMDB_KEY
                 ? 'CONFIGURADA'
                 : 'AUSENTE'
         );
 
         console.log(
-            'Serviços:',
+            'Streaming:',
             PROVIDERS
                 .map(
                     provider =>
@@ -813,7 +1094,13 @@ app.listen(
         );
 
         console.log(
+            'Ordenação:',
+            'LANÇAMENTO — MAIS RECENTE PRIMEIRO'
+        );
+
+        console.log(
             '========================================'
         );
+
     }
 );
