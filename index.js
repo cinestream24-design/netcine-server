@@ -34,7 +34,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// CONFIGURAÇÃO DOS STREAMINGS
+// CONFIGURAÇÃO DOS STREAMINGS (EXPANDIDA)
 // ============================================================
 
 const PROVIDERS = [
@@ -72,6 +72,61 @@ const PROVIDERS = [
         id: 'globoplay',
         name: 'Globoplay',
         tmdbId: 307
+    },
+    {
+        id: 'crunchyroll',
+        name: 'Crunchyroll',
+        tmdbId: 521
+    },
+    {
+        id: 'telecine',
+        name: 'Telecine',
+        tmdbId: 190
+    },
+    {
+        id: 'agoratv',
+        name: 'Agora TV',
+        tmdbId: 278
+    },
+    {
+        id: 'now',
+        name: 'NOW',
+        tmdbId: 1446
+    },
+    {
+        id: 'clarotv',
+        name: 'Claro TV+',
+        tmdbId: 1801
+    },
+    {
+        id: 'vivoplay',
+        name: 'Vivo Play',
+        tmdbId: 1449
+    },
+    {
+        id: 'plutotv',
+        name: 'Pluto TV',
+        tmdbId: 34
+    },
+    {
+        id: 'plex',
+        name: 'Plex',
+        tmdbId: 1191
+    },
+    {
+        id: 'roku',
+        name: 'Roku Channel',
+        tmdbId: 1963
+    },
+    {
+        id: 'hulu',
+        name: 'Hulu',
+        tmdbId: 1481
+    },
+    {
+        id: 'filmrise',
+        name: 'FilmRise',
+        tmdbId: 1873
     }
 ];
 
@@ -233,7 +288,7 @@ for (const provider of PROVIDERS) {
 
 const MANIFEST = {
     id: 'br.netcine.catalog',
-    version: '2.3.0',
+    version: '2.5.0',
     name: 'NetCine',
     description:
         'Catálogo brasileiro de filmes, séries, animes, desenhos infantis e doramas organizado por serviço de streaming.',
@@ -268,7 +323,7 @@ app.get('/', (req, res) => {
 
     res.json({
         name: 'NetCine',
-        version: '2.3.0',
+        version: '2.5.0',
         status: 'online',
         mode: 'catalog-only',
         region: REGION,
@@ -870,7 +925,7 @@ async function catalogHandler(req, res) {
     } catch (error) {
 
         console.error(
-            '[NetCine 2.3]',
+            '[NetCine 2.5]',
             error.message
         );
 
@@ -992,7 +1047,7 @@ app.listen(
         );
 
         console.log(
-            'NetCine Catálogo 2.3.0'
+            'NetCine Catálogo 2.5.0'
         );
 
         console.log(
