@@ -1,16 +1,37 @@
-const http = require('http');
+const express = require('express');
+
+const app = express();
 
 const PORT = process.env.PORT || 8080;
 
-const TMDB_KEY = process.env.TMDB_KEY || 'd8e8e85d692358d3b5db2cfd08487457';
+const TMDB_KEY = process.env.TMDB_KEY;
+
 const TMDB_BASE = 'https://api.themoviedb.org/3';
+const IMAGE_BASE = 'https://image.tmdb.org/t/p';
 
 const LANGUAGE = 'pt-BR';
 const REGION = 'BR';
 
 
 // ============================================================
-// SERVIÇOS
+// CORS
+// ============================================================
+
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(204);
+    }
+
+    next();
+});
+
+
+// ============================================================
+// SERVIÇOS DE STREAMING
 // ============================================================
 
 const PROVIDERS = [
@@ -60,52 +81,49 @@ const PROVIDERS = [
 
 
 // ============================================================
-// MANIFEST
-//
-// SOMENTE CATÁLOGO
-//
-// SEM:
-// stream
-// meta
-// extra
-// options
-// configurações
-//
-// O objetivo aqui é deixar o Nuvio aceitar o addon primeiro.
+// GÊNEROS
 // ============================================================
 
-const catalogs = [];
-
-for (const provider of PROVIDERS) {
-
-    catalogs.push({
-        id: provider.id + '_movies',
-        type: 'movie',
-        name: provider.name + ' • Filmes'
-    });
-
-    catalogs.push({
-        id: provider.id + '_series',
-        type: 'series',
-        name: provider.name + ' • Séries'
-    });
-}
-
-
-const MANIFEST = {
-    id: 'br.netcine.catalog',
-    version: '3.0.0',
-    name: 'NetCine',
-    description: 'Catálogo de filmes e séries organizado por serviços de streaming.',
-    logo: PROVIDERS[0].logo,
-    resources: [
-        'catalog'
+const GENRES = {
+    movie: [
+        ['all', 'Todos'],
+        ['28', 'Ação'],
+        ['12', 'Aventura'],
+        ['16', 'Animação'],
+        ['35', 'Comédia'],
+        ['80', 'Crime'],
+        ['99', 'Documentário'],
+        ['18', 'Drama'],
+        ['10751', 'Família'],
+        ['14', 'Fantasia'],
+        ['27', 'Terror'],
+        ['878', 'Ficção científica'],
+        ['53', 'Thriller'],
+        ['10749', 'Romance'],
+        ['36', 'História'],
+        ['9648', 'Mistério'],
+        ['10752', 'Guerra'],
+        ['37', 'Faroeste']
     ],
-    types: [
-        'movie',
-        'series'
-    ],
-    catalogs: catalogs
+
+    series: [
+        ['all', 'Todos'],
+        ['10759', 'Ação e aventura'],
+        ['16', 'Animação'],
+        ['35', 'Comédia'],
+        ['80', 'Crime'],
+        ['99', 'Documentário'],
+        ['18', 'Drama'],
+        ['10751', 'Família'],
+        ['10762', 'Infantil'],
+        ['9648', 'Mistério'],
+        ['10765', 'Ficção científica e fantasia'],
+        ['10768', 'Guerra e política'],
+        ['10763', 'Notícias'],
+        ['10764', 'Reality'],
+        ['10766', 'Novela'],
+        ['10767', 'Talk show']
+    ]
 };
 
 
@@ -115,7 +133,38 @@ const MANIFEST = {
 
 const cache = new Map();
 
-const CACHE_TIME = 10 * 60 * 1000;
+const CACHE_TTL = 10 * 60 * 1000;
+
+const MAX_CACHE_ITEMS = 500;
+
+
+// ============================================================
+// FUNÇÕES AUXILIARES
+// ============================================================
+
+function cleanCache() {
+
+    const now = Date.now();
+
+    for (const [key, value] of cache) {
+
+        if (now - value.time > CACHE_TTL) {
+            cache.delete(key);
+        }
+    }
+
+    while (cache.size > MAX_CACHE_ITEMS) {
+
+        const firstKey = cache.keys().next().value;
+
+        if (!firstKey) break;
+
+        cache.delete(firstKey);
+    }
+}
+
+
+setInterval(cleanCache, 5 * 60 * 1000);
 
 
 // ============================================================
@@ -124,28 +173,49 @@ const CACHE_TIME = 10 * 60 * 1000;
 
 async function tmdb(path, params = {}) {
 
+    if (!TMDB_KEY) {
+        throw new Error('TMDB_KEY não configurada');
+    }
+
     const query = new URLSearchParams();
 
     query.set('api_key', TMDB_KEY);
     query.set('language', LANGUAGE);
+    query.set('watch_region', REGION);
 
     for (const [key, value] of Object.entries(params)) {
-        query.set(key, String(value));
+
+        if (
+            value !== undefined &&
+            value !== null &&
+            value !== ''
+        ) {
+            query.set(key, String(value));
+        }
     }
 
-    const url = TMDB_BASE + path + '?' + query.toString();
+    const url =
+        `${TMDB_BASE}${path}?${query.toString()}`;
 
-    const old = cache.get(url);
+    const cached = cache.get(url);
 
-    if (old && Date.now() - old.time < CACHE_TIME) {
-        return old.data;
+    if (
+        cached &&
+        Date.now() - cached.time < CACHE_TTL
+    ) {
+        return cached.data;
     }
 
-    const response = await fetch(url);
+    const response = await fetch(url, {
+        headers: {
+            Accept: 'application/json'
+        }
+    });
 
     if (!response.ok) {
+
         throw new Error(
-            'TMDB HTTP ' + response.status
+            `TMDB HTTP ${response.status}`
         );
     }
 
@@ -153,7 +223,7 @@ async function tmdb(path, params = {}) {
 
     cache.set(url, {
         time: Date.now(),
-        data: data
+        data
     });
 
     return data;
@@ -164,76 +234,85 @@ async function tmdb(path, params = {}) {
 // IMAGENS
 // ============================================================
 
-function image(path, size) {
+function poster(path) {
 
     if (!path) {
         return null;
     }
 
-    return 'https://image.tmdb.org/t/p/' +
-        (size || 'w500') +
-        path;
+    return `${IMAGE_BASE}/w500${path}`;
+}
+
+
+function background(path) {
+
+    if (!path) {
+        return null;
+    }
+
+    return `${IMAGE_BASE}/w1280${path}`;
 }
 
 
 // ============================================================
-// METADATA DO CATÁLOGO
+// METADATA
 // ============================================================
 
-function createMeta(item, type, provider) {
+function convertItem(item, type, provider = null) {
 
-    let name = '';
-    let originalTitle = '';
-    let releaseDate = '';
+    const isMovie = type === 'movie';
 
-    if (type === 'movie') {
+    const title = isMovie
+        ? item.title
+        : item.name;
 
-        name = item.title || '';
-        originalTitle = item.original_title || '';
-        releaseDate = item.release_date || '';
+    const originalTitle = isMovie
+        ? item.original_title
+        : item.original_name;
 
-    } else {
-
-        name = item.name || '';
-        originalTitle = item.original_name || '';
-        releaseDate = item.first_air_date || '';
-    }
-
+    const releaseDate = isMovie
+        ? item.release_date
+        : item.first_air_date;
 
     const meta = {
-        id: 'tmdb:' + item.id,
 
-        type: type,
+        id: `tmdb:${item.id}`,
 
-        name: name || originalTitle || 'Sem título',
+        type,
 
-        poster: image(
-            item.poster_path,
-            'w500'
-        ),
+        name:
+            title ||
+            originalTitle ||
+            'Sem título',
 
-        background: image(
-            item.backdrop_path,
-            'w1280'
-        ),
+        poster:
+            poster(item.poster_path),
 
-        description: item.overview || '',
+        background:
+            background(item.backdrop_path),
 
-        releaseInfo: releaseDate
-            ? releaseDate.substring(0, 4)
-            : '',
+        description:
+            item.overview || '',
 
-        posterShape: 'poster',
+        releaseInfo:
+            releaseDate
+                ? releaseDate.substring(0, 4)
+                : '',
 
-        netcineProvider: provider.id,
+        posterShape:
+            'poster',
 
-        netcineProviderName: provider.name
+        behaviorHints: {
+            defaultVideoId:
+                `tmdb:${item.id}`
+        }
     };
 
 
     if (
         typeof item.vote_average === 'number'
     ) {
+
         meta.imdbRating =
             Number(
                 item.vote_average.toFixed(1)
@@ -244,7 +323,19 @@ function createMeta(item, type, provider) {
     if (
         Array.isArray(item.genre_ids)
     ) {
-        meta.genres = item.genre_ids;
+
+        meta.genres =
+            item.genre_ids;
+    }
+
+
+    if (provider) {
+
+        meta.netcineProvider =
+            provider.id;
+
+        meta.netcineProviderName =
+            provider.name;
     }
 
 
@@ -253,436 +344,760 @@ function createMeta(item, type, provider) {
 
 
 // ============================================================
-// ENCONTRAR SERVIÇO
+// CONFIGURAÇÃO DOS TIPOS DE CATÁLOGO
+// ============================================================
+
+const CATALOG_TYPES = [
+
+    {
+        id: 'popular',
+        name: '🔥 Populares',
+        sort: 'popularity.desc'
+    },
+
+    {
+        id: 'top',
+        name: '⭐ Mais bem avaliados',
+        sort: 'vote_average.desc',
+        extra: {
+            'vote_count.gte': 100
+        }
+    },
+
+    {
+        id: 'trending',
+        name: '📈 Em alta',
+        sort: 'popularity.desc',
+        extra: {
+            'vote_count.gte': 10
+        }
+    },
+
+    {
+        id: 'recent',
+        name: '🆕 Recentes',
+        sort: 'primary_release_date.desc'
+    },
+
+    {
+        id: 'featured',
+        name: '🎬 Destaques',
+        sort: 'vote_average.desc',
+        extra: {
+            'vote_count.gte': 50
+        }
+    }
+];
+
+
+// ============================================================
+// MANIFEST CATALOGS
+// ============================================================
+
+const catalogs = [];
+
+
+// ------------------------------------------------------------
+// CATÁLOGOS POR SERVIÇO
+// ------------------------------------------------------------
+
+for (const provider of PROVIDERS) {
+
+    for (const type of ['movie', 'series']) {
+
+        const typeName =
+            type === 'movie'
+                ? 'Filmes'
+                : 'Séries';
+
+
+        // Catálogo principal
+        catalogs.push({
+
+            id:
+                `${provider.id}_${type}`,
+
+            type,
+
+            name:
+                `${provider.name} • ${typeName}`,
+
+            extra: [
+
+                {
+                    name: 'genre',
+
+                    isRequired: false,
+
+                    options:
+                        GENRES[type].map(
+                            item => item[0]
+                        )
+                },
+
+                {
+                    name: 'skip',
+
+                    isRequired: false
+                }
+            ]
+        });
+
+
+        // Categorias
+        for (
+            const category
+            of CATALOG_TYPES
+        ) {
+
+            catalogs.push({
+
+                id:
+                    `${provider.id}_${type}_${category.id}`,
+
+                type,
+
+                name:
+                    `${provider.name} • ${category.name}`,
+
+                extra: [
+
+                    {
+                        name: 'genre',
+
+                        isRequired: false,
+
+                        options:
+                            GENRES[type].map(
+                                item => item[0]
+                            )
+                    },
+
+                    {
+                        name: 'skip',
+
+                        isRequired: false
+                    }
+                ]
+            });
+        }
+    }
+}
+
+
+// ============================================================
+// CATÁLOGOS GERAIS
+// ============================================================
+
+catalogs.push({
+
+    id: 'all_movies',
+
+    type: 'movie',
+
+    name: '🔥 Filmes • Populares',
+
+    extra: [
+        {
+            name: 'genre',
+            isRequired: false,
+            options:
+                GENRES.movie.map(
+                    item => item[0]
+                )
+        },
+        {
+            name: 'skip',
+            isRequired: false
+        }
+    ]
+});
+
+
+catalogs.push({
+
+    id: 'all_series',
+
+    type: 'series',
+
+    name: '🔥 Séries • Populares',
+
+    extra: [
+        {
+            name: 'genre',
+            isRequired: false,
+            options:
+                GENRES.series.map(
+                    item => item[0]
+                )
+        },
+        {
+            name: 'skip',
+            isRequired: false
+        }
+    ]
+});
+
+
+// ============================================================
+// MANIFEST
+// ============================================================
+
+const MANIFEST = {
+
+    id: 'br.netcine.catalog',
+
+    version: '2.3.0',
+
+    name: 'NetCine',
+
+    description:
+        'Catálogo completo de filmes e séries organizado por serviços de streaming.',
+
+    logo:
+        PROVIDERS[0].logo,
+
+    resources: [
+        'catalog'
+    ],
+
+    types: [
+        'movie',
+        'series'
+    ],
+
+    catalogs
+};
+
+
+// ============================================================
+// MANIFEST.JSON
+// ============================================================
+
+app.get('/manifest.json', (req, res) => {
+
+    res.setHeader(
+        'Content-Type',
+        'application/json; charset=utf-8'
+    );
+
+    res.json(MANIFEST);
+});
+
+
+// ============================================================
+// HOME / STATUS
+// ============================================================
+
+app.get('/', (req, res) => {
+
+    res.json({
+
+        name: 'NetCine',
+
+        version: '2.3.0',
+
+        status: 'online',
+
+        mode: 'catalog-only',
+
+        region: REGION,
+
+        tmdb:
+            TMDB_KEY
+                ? 'configured'
+                : 'missing',
+
+        providers:
+            PROVIDERS.length,
+
+        catalogs:
+            catalogs.length,
+
+        resources: [
+            'catalog'
+        ]
+    });
+});
+
+
+// ============================================================
+// LOCALIZAR SERVIÇO
 // ============================================================
 
 function findProvider(id) {
 
     return PROVIDERS.find(
-        provider => provider.id === id
+        provider =>
+            provider.id === id
     );
 }
 
 
 // ============================================================
-// CATÁLOGO
+// IDENTIFICAR CATEGORIA
 // ============================================================
 
-async function getCatalog(
+function findCategory(id) {
+
+    return CATALOG_TYPES.find(
+        category =>
+            category.id === id
+    );
+}
+
+
+// ============================================================
+// DESCOBRIR CONFIGURAÇÃO PELO ID
+// ============================================================
+
+function parseCatalogId(catalogId) {
+
+    if (!catalogId) {
+        return null;
+    }
+
+
+    // --------------------------------------------------------
+    // Catálogos gerais
+    // --------------------------------------------------------
+
+    if (catalogId === 'all_movies') {
+
+        return {
+            type: 'movie',
+            provider: null,
+            category: null
+        };
+    }
+
+
+    if (catalogId === 'all_series') {
+
+        return {
+            type: 'series',
+            provider: null,
+            category: null
+        };
+    }
+
+
+    // --------------------------------------------------------
+    // Serviço
+    // --------------------------------------------------------
+
+    for (const provider of PROVIDERS) {
+
+        const movieBase =
+            `${provider.id}_movie`;
+
+        const seriesBase =
+            `${provider.id}_series`;
+
+
+        if (catalogId === movieBase) {
+
+            return {
+                type: 'movie',
+                provider,
+                category: null
+            };
+        }
+
+
+        if (catalogId === seriesBase) {
+
+            return {
+                type: 'series',
+                provider,
+                category: null
+            };
+        }
+
+
+        for (
+            const category
+            of CATALOG_TYPES
+        ) {
+
+            if (
+                catalogId ===
+                `${provider.id}_movie_${category.id}`
+            ) {
+
+                return {
+                    type: 'movie',
+                    provider,
+                    category
+                };
+            }
+
+
+            if (
+                catalogId ===
+                `${provider.id}_series_${category.id}`
+            ) {
+
+                return {
+                    type: 'series',
+                    provider,
+                    category
+                };
+            }
+        }
+    }
+
+
+    return null;
+}
+
+
+// ============================================================
+// MONTAR PARÂMETROS DISCOVER
+// ============================================================
+
+function buildDiscoverParams(
     type,
-    providerId,
-    skip
+    provider,
+    category,
+    genre,
+    page
 ) {
 
-    const provider =
-        findProvider(providerId);
+    const params = {
+
+        page,
+
+        sort_by:
+            category?.sort ||
+            'popularity.desc'
+    };
 
 
-    if (!provider) {
-        return [];
+    // --------------------------------------------------------
+    // Serviço de streaming
+    // --------------------------------------------------------
+
+    if (provider) {
+
+        params.with_watch_providers =
+            provider.tmdbId;
+
+        params.watch_region =
+            REGION;
+
+        params.with_watch_monetization_types =
+            'flatrate';
     }
 
 
-    const page =
-        Math.floor(
-            Number(skip || 0) / 20
-        ) + 1;
+    // --------------------------------------------------------
+    // Gênero
+    // --------------------------------------------------------
 
+    if (
+        genre &&
+        genre !== 'all'
+    ) {
 
-    let endpoint = '';
-
-
-    if (type === 'movie') {
-        endpoint = '/discover/movie';
-    } else {
-        endpoint = '/discover/tv';
+        params.with_genres =
+            genre;
     }
 
 
-    const data = await tmdb(
-        endpoint,
-        {
-            watch_region: REGION,
+    // --------------------------------------------------------
+    // Categoria "Mais bem avaliados"
+    // --------------------------------------------------------
 
-            with_watch_providers:
-                provider.tmdbId,
+    if (
+        category?.extra
+    ) {
 
-            with_watch_monetization_types:
-                'flatrate',
+        Object.assign(
+            params,
+            category.extra
+        );
+    }
 
-            sort_by:
-                'popularity.desc',
 
-            page: page
+    // --------------------------------------------------------
+    // Recentes
+    // --------------------------------------------------------
+
+    if (
+        category?.id === 'recent'
+    ) {
+
+        const now =
+            new Date();
+
+        const currentYear =
+            now.getUTCFullYear();
+
+        const currentMonth =
+            String(
+                now.getUTCMonth() + 1
+            ).padStart(2, '0');
+
+        const currentDay =
+            String(
+                now.getUTCDate()
+            ).padStart(2, '0');
+
+
+        const today =
+            `${currentYear}-${currentMonth}-${currentDay}`;
+
+
+        if (type === 'movie') {
+
+            params['primary_release_date.lte'] =
+                today;
         }
-    );
+        else {
+
+            params['first_air_date.lte'] =
+                today;
+        }
+
+
+        params['vote_count.gte'] =
+            5;
+    }
+
+
+    return params;
+}
+
+
+// ============================================================
+// HANDLER PRINCIPAL
+// ============================================================
+
+async function catalogHandler(req, res) {
+
+    const catalogId =
+        req.params.catalogId ||
+        req.params.provider;
+
+
+    const type =
+        req.params.type;
+
+
+    let config =
+        parseCatalogId(
+            catalogId
+        );
+
+
+    // --------------------------------------------------------
+    // Compatibilidade com rota antiga
+    // /catalog/movie/netflix.json
+    // --------------------------------------------------------
+
+    if (!config) {
+
+        const provider =
+            findProvider(
+                req.params.provider
+            );
+
+
+        if (
+            provider &&
+            ['movie', 'series']
+                .includes(type)
+        ) {
+
+            config = {
+
+                type,
+
+                provider,
+
+                category: null
+            };
+        }
+    }
+
+
+    if (!config) {
+
+        return res.json({
+            metas: []
+        });
+    }
+
+
+    const requestedType =
+        config.type;
+
+
+    let skip =
+        parseInt(
+            req.query.skip || '0',
+            10
+        );
 
 
     if (
-        !data ||
-        !Array.isArray(data.results)
+        Number.isNaN(skip) ||
+        skip < 0
     ) {
-        return [];
+
+        skip = 0;
     }
 
 
-    return data.results.map(
-        item =>
-            createMeta(
-                item,
-                type,
-                provider
+    const genre =
+        req.query.genre ||
+        'all';
+
+
+    const page =
+        Math.floor(skip / 20) + 1;
+
+
+    const params =
+        buildDiscoverParams(
+            requestedType,
+            config.provider,
+            config.category,
+            genre,
+            page
+        );
+
+
+    try {
+
+        const endpoint =
+            requestedType === 'movie'
+                ? '/discover/movie'
+                : '/discover/tv';
+
+
+        const data =
+            await tmdb(
+                endpoint,
+                params
+            );
+
+
+        let results =
+            Array.isArray(
+                data.results
             )
-    );
+                ? data.results
+                : [];
+
+
+        // ----------------------------------------------------
+        // Remover itens sem poster
+        // ----------------------------------------------------
+
+        results =
+            results.filter(
+                item =>
+                    item.poster_path
+            );
+
+
+        // ----------------------------------------------------
+        // Converter para formato Nuvio/Stremio
+        // ----------------------------------------------------
+
+        const metas =
+            results.map(
+                item =>
+                    convertItem(
+                        item,
+                        requestedType,
+                        config.provider
+                    )
+            );
+
+
+        res.json({
+            metas
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            '[NetCine Catalog]',
+            error.message
+        );
+
+
+        res.status(200).json({
+            metas: []
+        });
+    }
 }
 
 
 // ============================================================
-// RESPOSTA JSON
+// ROTAS
 // ============================================================
 
-function sendJson(
-    response,
-    status,
-    data
-) {
 
-    const body =
-        JSON.stringify(data);
+// ------------------------------------------------------------
+// NOVO FORMATO
+// /catalog/movie/netflix_movie_popular.json
+// ------------------------------------------------------------
+
+app.get(
+    '/catalog/:type/:catalogId.json',
+    catalogHandler
+);
 
 
-    response.statusCode = status;
+// ------------------------------------------------------------
+// Formato com extra
+// ------------------------------------------------------------
 
-    response.setHeader(
-        'Content-Type',
-        'application/json; charset=utf-8'
-    );
+app.get(
+    '/catalog/:type/:catalogId/:extra.json',
+    catalogHandler
+);
 
-    response.setHeader(
-        'Access-Control-Allow-Origin',
-        '*'
-    );
 
-    response.setHeader(
-        'Access-Control-Allow-Headers',
-        '*'
-    );
+// ------------------------------------------------------------
+// Compatibilidade
+// ------------------------------------------------------------
 
-    response.setHeader(
-        'Access-Control-Allow-Methods',
-        'GET, OPTIONS'
-    );
+app.get(
+    '/catalog/:type/:provider/:extra/:id.json',
+    catalogHandler
+);
 
-    response.end(body);
-}
+
+// ============================================================
+// ERROS
+// ============================================================
+
+app.use(
+    (err, req, res, next) => {
+
+        console.error(
+            '[NetCine Server]',
+            err
+        );
+
+        res.status(200).json({
+            metas: []
+        });
+    }
+);
 
 
 // ============================================================
 // SERVIDOR
 // ============================================================
 
-const server = http.createServer(
-    async (request, response) => {
-
-        try {
-
-            if (
-                request.method === 'OPTIONS'
-            ) {
-                response.statusCode = 204;
-                response.end();
-                return;
-            }
-
-
-            const url =
-                new URL(
-                    request.url,
-                    'http://' +
-                    (request.headers.host ||
-                        'localhost')
-                );
-
-
-            const path =
-                url.pathname;
-
-
-            // ------------------------------------------------
-            // MANIFEST
-            // ------------------------------------------------
-
-            if (
-                path === '/manifest.json'
-            ) {
-
-                sendJson(
-                    response,
-                    200,
-                    MANIFEST
-                );
-
-                return;
-            }
-
-
-            // ------------------------------------------------
-            // HOME
-            // ------------------------------------------------
-
-            if (
-                path === '/'
-            ) {
-
-                sendJson(
-                    response,
-                    200,
-                    {
-                        name: 'NetCine',
-
-                        status: 'online',
-
-                        mode: 'catalog-only',
-
-                        version: '3.0.0',
-
-                        resources: [
-                            'catalog'
-                        ],
-
-                        catalogs:
-                            catalogs.length,
-
-                        services:
-                            PROVIDERS.map(
-                                provider =>
-                                    provider.name
-                            )
-                    }
-                );
-
-                return;
-            }
-
-
-            // ------------------------------------------------
-            // CATALOG
-            //
-            // /catalog/movie/netflix_movies.json
-            //
-            // /catalog/series/disney_plus_series.json
-            // ------------------------------------------------
-
-            const match =
-                path.match(
-                    /^\/catalog\/(movie|series)\/([^/]+)\.json$/
-                );
-
-
-            if (match) {
-
-                const type =
-                    match[1];
-
-                const catalogId =
-                    match[2];
-
-
-                let provider = null;
-
-
-                for (
-                    const item of PROVIDERS
-                ) {
-
-                    if (
-                        catalogId ===
-                        item.id + '_movies'
-                    ) {
-
-                        provider = item;
-                        break;
-                    }
-
-
-                    if (
-                        catalogId ===
-                        item.id + '_series'
-                    ) {
-
-                        provider = item;
-                        break;
-                    }
-                }
-
-
-                if (!provider) {
-
-                    sendJson(
-                        response,
-                        200,
-                        {
-                            metas: []
-                        }
-                    );
-
-                    return;
-                }
-
-
-                const skip =
-                    parseInt(
-                        url.searchParams.get(
-                            'skip'
-                        ) || '0',
-                        10
-                    ) || 0;
-
-
-                const metas =
-                    await getCatalog(
-                        type,
-                        provider.id,
-                        skip
-                    );
-
-
-                sendJson(
-                    response,
-                    200,
-                    {
-                        metas: metas
-                    }
-                );
-
-
-                return;
-            }
-
-
-            // ------------------------------------------------
-            // CATALOG COM EXTRA
-            //
-            // Compatibilidade
-            // ------------------------------------------------
-
-            const extraMatch =
-                path.match(
-                    /^\/catalog\/(movie|series)\/([^/]+)\/(.+)\.json$/
-                );
-
-
-            if (extraMatch) {
-
-                const type =
-                    extraMatch[1];
-
-                const catalogId =
-                    extraMatch[2];
-
-
-                let provider = null;
-
-
-                for (
-                    const item of PROVIDERS
-                ) {
-
-                    if (
-                        catalogId ===
-                        item.id + '_movies' ||
-                        catalogId ===
-                        item.id + '_series'
-                    ) {
-
-                        provider = item;
-                        break;
-                    }
-                }
-
-
-                if (!provider) {
-
-                    sendJson(
-                        response,
-                        200,
-                        {
-                            metas: []
-                        }
-                    );
-
-                    return;
-                }
-
-
-                const skip =
-                    parseInt(
-                        url.searchParams.get(
-                            'skip'
-                        ) || '0',
-                        10
-                    ) || 0;
-
-
-                const metas =
-                    await getCatalog(
-                        type,
-                        provider.id,
-                        skip
-                    );
-
-
-                sendJson(
-                    response,
-                    200,
-                    {
-                        metas: metas
-                    }
-                );
-
-
-                return;
-            }
-
-
-            // ------------------------------------------------
-            // 404
-            // ------------------------------------------------
-
-            sendJson(
-                response,
-                404,
-                {
-                    error: 'Not found'
-                }
-            );
-
-
-        } catch (error) {
-
-            console.error(
-                '[NetCine]',
-                error
-            );
-
-
-            sendJson(
-                response,
-                200,
-                {
-                    metas: []
-                }
-            );
-        }
-    }
-);
-
-
-// ============================================================
-// START
-// ============================================================
-
-server.listen(
+app.listen(
     PORT,
     () => {
 
@@ -691,7 +1106,11 @@ server.listen(
         );
 
         console.log(
-            'NetCine Catálogo iniciado'
+            'NetCine Catálogo 2.3.0'
+        );
+
+        console.log(
+            '========================================'
         );
 
         console.log(
@@ -700,13 +1119,13 @@ server.listen(
         );
 
         console.log(
-            'Versão:',
-            '3.0.0'
+            'Modo:',
+            'SOMENTE CATÁLOGO'
         );
 
         console.log(
-            'Modo:',
-            'SOMENTE CATÁLOGO'
+            'Região:',
+            REGION
         );
 
         console.log(
@@ -717,18 +1136,13 @@ server.listen(
         );
 
         console.log(
-            'Catálogos:',
-            catalogs.length
+            'Serviços:',
+            PROVIDERS.length
         );
 
         console.log(
-            'Serviços:',
-            PROVIDERS
-                .map(
-                    provider =>
-                        provider.name
-                )
-                .join(', ')
+            'Catálogos:',
+            catalogs.length
         );
 
         console.log(
