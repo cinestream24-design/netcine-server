@@ -1,5 +1,6 @@
 const express = require('express');
 const fetch = require('node-fetch');
+const cheerio = require('cheerio');
 const https = require('https');
 const dns = require('dns');
 
@@ -15,10 +16,23 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 let _host = null;
 let _cookies = null;
 
-// 2. Agente HTTPS para ignorar erros de certificado SSL inválido
+// Agente HTTPS para ignorar erros de certificados SSL inválidos/incompletos
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false
 });
+
+// Converter ID IMDB (ex: tt9288030) em nome de filme/série usando o Cinemeta
+async function getMetaFromImdb(id, type) {
+    try {
+        const imdbId = id.split(':')[0];
+        const res = await fetch(`https://v3-cinemeta.strem.fun/meta/${type}/${imdbId}.json`);
+        const data = await res.json();
+        return data?.meta?.name || null;
+    } catch (e) {
+        console.log('[NetCine] Erro ao converter ID IMDB via Cinemeta:', e.message);
+        return null;
+    }
+}
 
 async function getHost() {
     if (_host) return _host;
@@ -35,7 +49,6 @@ async function getHost() {
         _host = BASE + '/';
     }
 
-    console.log('[NetCine] Host:', _host);
     return _host;
 }
 
@@ -74,9 +87,14 @@ app.use((req, res, next) => {
     next();
 });
 
+// Rota padrão/Healthcheck
+app.get('/', (req, res) => {
+    res.send('NetCine Addon está ativo!');
+});
+
 // Endpoint do Manifest do Stremio
 app.get('/manifest.json', (req, res) => {
-    const manifest = {
+    res.json({
         id: 'org.netcine.addon',
         version: '1.0.0',
         name: 'NetCine',
@@ -84,35 +102,64 @@ app.get('/manifest.json', (req, res) => {
         resources: ['stream'],
         types: ['movie', 'series'],
         idPrefixes: ['tt']
-    };
-    res.json(manifest);
+    });
 });
 
-// Endpoint dos Streams
+// Endpoint de Streams
 app.get('/stream/:type/:id.json', async (req, res) => {
     const { type, id } = req.params;
     console.log(`[NetCine] ▶ ${type} ${id}`);
 
+    const streams = [];
+
     try {
+        // 1. Obtém o nome do título pelo Cinemeta
+        const title = await getMetaFromImdb(id, type);
+        
+        if (!title) {
+            console.log(`[NetCine] Não foi possível obter o título para ${id}`);
+            return res.json({ streams: [] });
+        }
+
+        console.log(`[NetCine] Título localizado: ${title}`);
         const host = await getHost();
-        
-        // Busca do título e extração de links
-        // Substitua/Ajuste os parâmetros abaixo conforme a estrutura de scraping do seu projeto original
-        const searchUrl = `${host}search/${encodeURIComponent(id)}/`;
-        console.log(`[NetCine] Buscando: ${searchUrl}`);
 
-        const html = await _get(searchUrl);
+        // 2. Busca o título no site
+        const searchUrl = `${host}search/${encodeURIComponent(title)}/`;
+        console.log(`[NetCine] Buscando no site: ${searchUrl}`);
 
-        // Exemplo de resposta estruturada para o Stremio
-        const streams = [];
+        const searchHtml = await _get(searchUrl);
+        const $ = cheerio.load(searchHtml);
 
-        // Adicione aqui a extração Regex/Cheerio específica do seu player se necessário
-        
-        res.json({ streams });
+        // 3. Obtém o primeiro resultado
+        const pageLink = $('article a, .item a, .result a').first().attr('href');
+
+        if (pageLink) {
+            // Converte link relativo em absoluto se necessário
+            const fullLink = pageLink.startsWith('http') ? pageLink : new URL(pageLink, host).href;
+            console.log(`[NetCine] Página encontrada: ${fullLink}`);
+
+            const pageHtml = await _get(fullLink);
+            const $page = cheerio.load(pageHtml);
+
+            // 4. Raspa os iframes do player
+            $page('iframe').each((i, el) => {
+                const iframeSrc = $page(el).attr('src') \vert{}\vert{}$page(el).attr('data-src');
+                
+                if (iframeSrc && !iframeSrc.includes('facebook') && !iframeSrc.includes('google')) {
+                    streams.push({
+                        name: 'NetCine',
+                        title: `${title} - Player ${i + 1}`,
+                        externalUrl: iframeSrc.startsWith('//') ? `https:${iframeSrc}` : iframeSrc
+                    });
+                }
+            });
+        }
     } catch (e) {
         console.log(`[NetCine] ERRO GERAL: ${e.message}`);
-        res.json({ streams: [] });
     }
+
+    res.json({ streams });
 });
 
 // Inicialização do Servidor
@@ -121,6 +168,5 @@ app.listen(PORT, () => {
     console.log('NetCine addon iniciado');
     console.log(`Porta: ${PORT}`);
     console.log('DNS Customizado: 1.1.1.1');
-    console.log('Proxy externo: DESATIVADO');
     console.log('========================================');
 });
