@@ -1,5 +1,5 @@
 const express = require('express');
-const fetch = require('node-fetch');
+const axios = require('axios');
 const cheerio = require('cheerio');
 const https = require('https');
 const dns = require('dns');
@@ -16,18 +16,27 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 let _host = null;
 let _cookies = null;
 
-// Agente HTTPS para ignorar erros de certificados SSL inválidos/incompletos
+// Agente HTTPS para ignorar erros de certificados SSL inválidos
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false
 });
 
-// Converter ID IMDB (ex: tt9288030) em nome de filme/série usando o Cinemeta
+// Instância Axios pré-configurada
+const client = axios.create({
+    httpsAgent,
+    timeout: 15000,
+    headers: {
+        'User-Agent': UA,
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
+    }
+});
+
+// Converter ID IMDB em nome de filme/série via Cinemeta
 async function getMetaFromImdb(id, type) {
     try {
         const imdbId = id.split(':')[0];
-        const res = await fetch(`https://v3-cinemeta.strem.fun/meta/${type}/${imdbId}.json`);
-        const data = await res.json();
-        return data?.meta?.name || null;
+        const res = await client.get(`https://v3-cinemeta.strem.fun/meta/${type}/${imdbId}.json`);
+        return res.data?.meta?.name || null;
     } catch (e) {
         console.log('[NetCine] Erro ao converter ID IMDB via Cinemeta:', e.message);
         return null;
@@ -38,12 +47,9 @@ async function getHost() {
     if (_host) return _host;
 
     try {
-        const r = await fetch(BASE, {
-            redirect: 'follow',
-            headers: { 'User-Agent': UA },
-            agent: httpsAgent
-        });
-        _host = r.url.replace(/\/$/, '') + '/';
+        const r = await client.get(BASE, { maxRedirects: 5 });
+        _host = r.request?.res?.responseUrl || BASE;
+        _host = _host.replace(/\/$/, '') + '/';
     } catch (e) {
         console.log('[NetCine] Erro ao descobrir host:', e.message);
         _host = BASE + '/';
@@ -52,32 +58,26 @@ async function getHost() {
     return _host;
 }
 
-async function _get(url, extraHeaders = {}) {
-    const headers = {
-        'User-Agent': UA,
-        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-        ...extraHeaders
-    };
-
+async function _get(url) {
+    const headers = {};
     if (_cookies) {
         headers['Cookie'] = _cookies;
     }
 
-    const r = await fetch(url, {
-        headers,
-        redirect: 'follow',
-        agent: httpsAgent
-    });
+    const r = await client.get(url, { headers });
 
-    const sc = r.headers.get('set-cookie');
-    if (sc) {
-        const match = sc.match(/PHPSESSID=([^;]+)/);
-        if (match) {
-            _cookies = 'PHPSESSID=' + match[1];
+    const sc = r.headers['set-cookie'];
+    if (sc && Array.isArray(sc)) {
+        const session = sc.find(cookie => cookie.includes('PHPSESSID'));
+        if (session) {
+            const match = session.match(/PHPSESSID=([^;]+)/);
+            if (match) {
+                _cookies = 'PHPSESSID=' + match[1];
+            }
         }
     }
 
-    return r.text();
+    return r.data;
 }
 
 // Configuração CORS
@@ -87,7 +87,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// Rota padrão/Healthcheck
+// Rota padrão / Healthcheck
 app.get('/', (req, res) => {
     res.send('NetCine Addon está ativo!');
 });
@@ -113,7 +113,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const streams = [];
 
     try {
-        // 1. Obtém o nome do título pelo Cinemeta
         const title = await getMetaFromImdb(id, type);
         
         if (!title) {
@@ -124,25 +123,21 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         console.log(`[NetCine] Título localizado: ${title}`);
         const host = await getHost();
 
-        // 2. Busca o título no site
         const searchUrl = `${host}search/${encodeURIComponent(title)}/`;
         console.log(`[NetCine] Buscando no site: ${searchUrl}`);
 
         const searchHtml = await _get(searchUrl);
         const $ = cheerio.load(searchHtml);
 
-        // 3. Obtém o primeiro resultado
         const pageLink = $('article a, .item a, .result a').first().attr('href');
 
         if (pageLink) {
-            // Converte link relativo em absoluto se necessário
             const fullLink = pageLink.startsWith('http') ? pageLink : new URL(pageLink, host).href;
             console.log(`[NetCine] Página encontrada: ${fullLink}`);
 
             const pageHtml = await _get(fullLink);
             const $page = cheerio.load(pageHtml);
 
-            // 4. Raspa os iframes do player
             $page('iframe').each((i, el) => {
                 const iframeSrc = $page(el).attr('src') \vert{}\vert{}$page(el).attr('data-src');
                 
