@@ -92,7 +92,7 @@ app.get('/', (req, res) => {
     res.send('NetCine Addon está ativo!');
 });
 
-// Endpoint do Manifest do Stremio
+// Manifest do Stremio
 app.get('/manifest.json', (req, res) => {
     res.json({
         id: 'org.netcine.addon',
