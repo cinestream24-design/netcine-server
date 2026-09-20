@@ -1,373 +1,147 @@
-const express = require('express');
-const axios = require('axios');
-const cheerio = require('cheerio');
-const https = require('https');
-const http = require('http');
-const dns = require('dns');
-
-// ===== DNS CLOUDFLARE (1.1.1.1) =====
-// dns.setServers só afeta dns.resolve*, não dns.lookup (usado pelo axios).
-// Por isso criamos um lookup customizado usando dns.Resolver.
-const DNS_SERVERS = ['1.1.1.1', '1.0.0.1', '8.8.8.8'];
-
-const resolver = new dns.Resolver();
-try {
-    resolver.setServers(DNS_SERVERS);
-    dns.setServers(DNS_SERVERS);
-    console.log('[NetCine] DNS definido para 1.1.1.1 (Cloudflare)');
-} catch (e) {
-    console.log('[NetCine] Aviso ao definir DNS:', e.message);
-}
-
-function customLookup(hostname, options, callback) {
-    if (typeof options === 'function') {
-        callback = options;
-        options = {};
-    }
-    options = options || {};
-    const family = options.family === 6 ? 6 : 4;
-    const resolveFn = family === 6
-        ? resolver.resolve6.bind(resolver)
-        : resolver.resolve4.bind(resolver);
-
-    resolveFn(hostname, (err, addresses) => {
-        if (err || !addresses || addresses.length === 0) {
-            // Se falhar, cai para o DNS padrão do sistema
-            return dns.lookup(hostname, options, callback);
-        }
-        if (options.all) {
-            return callback(null, addresses.map(address => ({ address, family })));
-        }
-        callback(null, addresses[0], family);
-    });
-}
-
-// Previne quedas por exceções não tratadas
-process.on('uncaughtException', (err) => console.error('[NetCine] Uncaught Exception:', err.message));
-process.on('unhandledRejection', (reason) => console.error('[NetCine] Unhandled Rejection:', reason));
+import express from 'express';
+import puppeteer from 'puppeteer';
+import { createWorker } from 'tesseract.js';
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 
-const BASE = 'https://eee1.lat';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+// Configuração do Manifesto do Add-on do Stremio
+const MANIFEST = {
+  id: 'org.flecha.scraper.addon',
+  version: '1.0.0',
+  name: 'Flecha Lat Scraper',
+  description: 'Add-on para extrair streams de flecha.lat com bypass de CAPTCHA',
+  resources: ['stream'],
+  types: ['movie', 'series'],
+  idPrefixes: ['tt', 'flecha'],
+  catalogs: []
+};
 
-let _host = null;
-let _cookies = null;
-
-const httpsAgent = new https.Agent({
-    rejectUnauthorized: false,
-    lookup: customLookup
-});
-
-const httpAgent = new http.Agent({
-    lookup: customLookup
-});
-
-const client = axios.create({
-    httpsAgent,
-    httpAgent,
-    timeout: 15000,
-    headers: {
-        'User-Agent': UA,
-        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
-    }
-});
-
-// Busca metadados do filme/série no Cinemeta pelo ID do IMDB
-async function getMetaFromImdb(id, type) {
-    try {
-        const imdbId = id.split(':')[0];
-        const res = await client.get(`https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`);
-        return res.data?.meta || null;
-    } catch (e) {
-        console.log('[NetCine] Erro ao converter ID IMDB via Cinemeta:', e.message);
-        return null;
-    }
-}
-
-// Descobre o domínio principal
-async function getHost() {
-    if (_host) return _host;
-    try {
-        const r = await client.get(BASE, { maxRedirects: 5 });
-        _host = r.request?.res?.responseUrl || BASE;
-        _host = _host.replace(/\/$/, '') + '/';
-    } catch (e) {
-        console.log('[NetCine] Erro ao descobrir host:', e.message);
-        _host = BASE + '/';
-    }
-    return _host;
-}
-
-// Helper para requisições com cookies
-async function _get(url) {
-    const headers = { 'Referer': BASE };
-    if (_cookies) headers['Cookie'] = _cookies;
-
-    const r = await client.get(url, { headers });
-
-    const sc = r.headers['set-cookie'];
-    if (sc && Array.isArray(sc)) {
-        const session = sc.find(cookie => cookie.includes('PHPSESSID'));
-        if (session) {
-            const match = session.match(/PHPSESSID=([^;]+)/);
-            if (match) _cookies = 'PHPSESSID=' + match[1];
-        }
-    }
-    return r.data;
-}
-
-// Configuração CORS
+// CORS para permitir acesso do Stremio Web/Desktop
 app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    next();
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  next();
 });
 
-// Healthcheck
-app.get('/', (req, res) => {
-    res.send('NetCine Addon está ativo!');
-});
-
-// Manifest do Stremio
+// Rota do Manifesto do Stremio
 app.get('/manifest.json', (req, res) => {
-    res.json({
-        id: 'org.netcine.addon',
-        version: '1.0.0',
-        name: 'NetCine',
-        description: 'Addon NetCine para Stremio (com resolução DNS 1.1.1.1)',
-        resources: ['stream'],
-        types: ['movie', 'series'],
-        idPrefixes: ['tt'],
-        catalogs: []
+  res.json(MANIFEST);
+});
+
+/**
+ * Função responsável por navegar até à página,
+ * resolver o CAPTCHA de verificação humana via OCR e capturar o stream.
+ */
+async function extractStreamUrl(episodeUrl) {
+  let streamUrl = null;
+
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu'
+    ]
+  });
+
+  const page = await browser.newPage();
+
+  try {
+    // Intercepta as requisições de rede em busca do link .m3u8 ou .mp4
+    page.on('request', (request) => {
+      const url = request.url();
+      if (url.includes('.m3u8') || (url.includes('.mp4') && !url.includes('captcha'))) {
+        streamUrl = url;
+      }
     });
-});
 
-// PROXY DE PLAYLIST (.m3u8)
-app.get('/proxy/playlist', async (req, res) => {
-    const { key, url: rawUrl } = req.query;
-    let targetUrl = '';
+    console.log(`[Puppeteer] A navegar até: ${episodeUrl}`);
+    await page.goto(episodeUrl, { waitUntil: 'networkidle2', timeout: 60000 });
 
-    if (key) {
-        targetUrl = Buffer.from(key, 'base64').toString('utf-8');
-    } else if (rawUrl) {
-        targetUrl = decodeURIComponent(rawUrl);
+    // Seletores ajustados com base na tela do site
+    const captchaInputSelector = 'input[placeholder="Código"], input[type="text"]';
+    const validateBtnSelector = 'button, input[type="submit"], input[value="Validar"]';
+
+    const hasCaptchaInput = await page.$(captchaInputSelector);
+
+    if (hasCaptchaInput) {
+      console.log('[Puppeteer] Verificação Humana detetada. A capturar imagem do CAPTCHA...');
+
+      // Tira screenshot da área do formulário de CAPTCHA
+      const captchaContainer = await page.$('.captcha-container, form, div:has(input)');
+      const imageBuffer = captchaContainer
+        ? await captchaContainer.screenshot()
+        : await page.screenshot();
+
+      // Executa OCR com Tesseract.js
+      const worker = await createWorker('eng');
+      const { data: { text } } = await worker.recognize(imageBuffer);
+      await worker.terminate();
+
+      const cleanedCode = text.replace(/[^a-zA-Z0-9]/g, '').trim();
+      console.log(`[OCR] Código lido do CAPTCHA: ${cleanedCode}`);
+
+      if (cleanedCode) {
+        // Preenche o código e clica em Validar
+        await page.type(captchaInputSelector, cleanedCode);
+        
+        await Promise.all([
+          page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button, input[type="submit"], .btn'));
+            const validateBtn = btns.find(b => b.textContent.includes('Validar') || b.value === 'Validar');
+            if (validateBtn) validateBtn.click();
+          }),
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
+        ]);
+      }
     }
 
-    if (!targetUrl) return res.status(400).send('URL inválida');
-
-    try {
-        const hostHeader = req.get('host');
-        const protocol = req.get('x-forwarded-proto') || req.protocol;
-        const serverHost = `${protocol}://${hostHeader}`;
-
-        const response = await client.get(targetUrl, {
-            headers: {
-                'User-Agent': UA,
-                'Referer': BASE
-            }
-        });
-
-        const m3u8Data = response.data;
-        if (typeof m3u8Data !== 'string') {
-            return res.status(500).send('Resposta HLS inválida');
-        }
-
-        const lines = m3u8Data.split(/\r?\n/);
-        const rewrittenLines = lines.map(line => {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) {
-                return line;
-            }
-            try {
-                const fullSegmentUrl = new URL(trimmed, targetUrl).href;
-                return `${serverHost}/proxy/seg?url=${encodeURIComponent(fullSegmentUrl)}`;
-            } catch (e) {
-                return line;
-            }
-        });
-
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.send(rewrittenLines.join('\n'));
-    } catch (e) {
-        console.log('[NetCine] Erro ao carregar playlist m3u8:', e.message);
-        res.status(500).send('Erro ao buscar a playlist');
+    // Aguarda que o player carregue o vídeo e o evento request capture a URL
+    let attempts = 0;
+    while (!streamUrl && attempts < 12) {
+      await new Promise((r) => setTimeout(r, 1000));
+      attempts++;
     }
-});
 
-// PROXY DE SEGMENTOS (.ts)
-app.get('/proxy/seg', async (req, res) => {
-    const { url: segmentUrl } = req.query;
-    if (!segmentUrl) return res.status(400).send('URL de segmento não fornecida');
+  } catch (error) {
+    console.error('[Puppeteer] Erro durante a extração:', error.message);
+  } finally {
+    await browser.close();
+  }
 
-    try {
-        const target = decodeURIComponent(segmentUrl);
-        const response = await client.get(target, {
-            responseType: 'stream',
-            headers: {
-                'User-Agent': UA,
-                'Referer': BASE
-            }
-        });
+  return streamUrl;
+}
 
-        res.setHeader('Content-Type', response.headers['content-type'] || 'video/mp2t');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        response.data.pipe(res);
-    } catch (e) {
-        res.status(500).send('Erro no segmento');
-    }
-});
-
-// DEBUG: mostra o HTML cru de uma página do site (remova depois de resolver)
-// Exemplo: /debug?path=search/Reacher/
-app.get('/debug', async (req, res) => {
-    const p = req.query.path || '';
-    try {
-        const host = await getHost();
-        const url = new URL(p, host).href;
-        if (new URL(url).host !== new URL(host).host) {
-            return res.status(400).type('text/plain').send('Host não permitido');
-        }
-        const r = await client.get(url, {
-            headers: { 'Referer': BASE },
-            validateStatus: () => true
-        });
-        const body = typeof r.data === 'string' ? r.data : JSON.stringify(r.data);
-        res.type('text/plain').send(`URL: ${url}\nStatus: ${r.status}\nTamanho: ${body.length}\n\n${body.slice(0, 4000)}`);
-    } catch (e) {
-        res.status(500).type('text/plain').send('Erro: ' + e.message);
-    }
-});
-
-// ENDPOINT DE STREAMS DO STREMIO
+// Rota de Streams do Stremio
 app.get('/stream/:type/:id.json', async (req, res) => {
-    const { type, id } = req.params;
-    console.log(`[NetCine] ▶ ${type} ${id}`);
+  const { id } = req.params;
+  console.log(`[Stremio] Pedido de stream recebido para o ID/slug: ${id}`);
 
-    const streams = [];
+  // Exemplo de construção do URL do episódio
+  // Se o id recebido for no formato 'reacher-01x01', ele monta a URL correta do site
+  const episodeUrl = `https://flecha.lat/episode/${id}/`;
 
-    try {
-        const meta = await getMetaFromImdb(id, type);
-        if (!meta || !meta.name) {
-            console.log(`[NetCine] Título não encontrado para ${id}`);
-            return res.json({ streams: [] });
+  const stream = await extractStreamUrl(episodeUrl);
+
+  if (stream) {
+    return res.json({
+      streams: [
+        {
+          name: 'Flecha Lat',
+          title: 'HD (Auto-Bypass CAPTCHA)',
+          url: stream
         }
+      ]
+    });
+  }
 
-        const title = meta.name;
-        const host = await getHost();
-
-        let season = null, episode = null;
-        if (type === 'series' && id.includes(':')) {
-            const parts = id.split(':');
-            season = parts[1];
-            episode = parts[2];
-            console.log(`[NetCine] Série ${id} -> Temp ${season} Ep ${episode}`);
-        }
-
-        const searchUrl = `${host}search/${encodeURIComponent(title)}/`;
-        console.log(`[NetCine] Buscando: ${searchUrl}`);
-
-        const searchHtml = await _get(searchUrl);
-        const $ = cheerio.load(searchHtml);
-
-        console.log(`[NetCine] Busca respondeu: ${typeof searchHtml === 'string' ? searchHtml.length + ' bytes' : typeof searchHtml} | <title>: ${$('title').first().text().trim()}`);
-
-        let pageLink = $('article a, .item a, .result a, .post-title a').first().attr('href');
-
-        if (!pageLink) {
-            const links = $('a[href]').map((i, el) => $(el).attr('href')).get().slice(0, 15);
-            console.log(`[NetCine] Nenhum resultado na busca. Primeiros links: ${links.join(' | ')}`);
-        }
-
-        if (pageLink) {
-            let fullLink = pageLink.startsWith('http') ? pageLink : new URL(pageLink, host).href;
-
-            if (type === 'series' && season && episode) {
-                const epSuffix = `season-${season}-episode-${episode}`;
-                const altSuffix = `temp-${season}-ep-${episode}`;
-
-                const pageHtml = await _get(fullLink);
-                const $page = cheerio.load(pageHtml);
-
-                const epLink = $page(`a[href*="${epSuffix}"], a[href*="${altSuffix}"], a[href*="s${season}e${episode}"]`).first().attr('href');
-                if (epLink) {
-                    fullLink = epLink.startsWith('http') ? epLink : new URL(epLink, host).href;
-                }
-            }
-
-            console.log(`[NetCine] Página encontrada: ${fullLink}`);
-            const itemHtml = await _get(fullLink);
-            const $item = cheerio.load(itemHtml);
-
-            const playerUrls = [];
-            $item('iframe, a.player-option, .embed-selector option').each((i, el) => {
-                const src = $item(el).attr('src') || $item(el).attr('data-src') || $item(el).attr('value') || $item(el).attr('href');
-                if (src && !src.includes('facebook') && !src.includes('google') && !src.includes('disqus')) {
-                    const fullSrc = src.startsWith('//') ? `https:${src}` : (src.startsWith('http') ? src : new URL(src, host).href);
-                    playerUrls.push(fullSrc);
-                }
-            });
-
-            console.log(`[NetCine] Players encontrados: ${playerUrls.length}`);
-
-            const hostHeader = req.get('host');
-            const protocol = req.get('x-forwarded-proto') || req.protocol;
-            const serverHost = `${protocol}://${hostHeader}`;
-
-            for (let i = 0; i < playerUrls.length; i++) {
-                const playerUrl = playerUrls[i];
-                try {
-                    console.log(`[NetCine] Resolvendo player: ${playerUrl}`);
-                    const playerHtml = await _get(playerUrl);
-
-                    let videoUrl = null;
-
-                    if (typeof playerHtml === 'string') {
-                        const m3u8Match = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|php\?token=[^\s"'<>]+))/i) ||
-                                          playerHtml.match(/source\s*:\s*["']([^"']+)["']/i) ||
-                                          playerHtml.match(/file\s*:\s*["']([^"']+)["']/i);
-                        videoUrl = m3u8Match ? m3u8Match[1] : null;
-                    }
-
-                    if (!videoUrl && playerUrl.includes('hls')) {
-                        videoUrl = playerUrl;
-                    }
-
-                    if (videoUrl) {
-                        const encodedKey = Buffer.from(videoUrl).toString('base64');
-                        const proxyUrl = `${serverHost}/proxy/playlist?key=${encodeURIComponent(encodedKey)}`;
-
-                        console.log(`[NetCine] HLS final: ${videoUrl}`);
-                        console.log(`[NetCine] Proxy URL: ${proxyUrl}`);
-
-                        const label = playerUrl.toLowerCase().includes('dub') ? 'DUBLADO' : (playerUrl.toLowerCase().includes('leg') ? 'LEGENDADO' : `Player ${i + 1}`);
-
-                        streams.push({
-                            name: 'NetCine',
-                            title: `${title} - ${label}`,
-                            url: proxyUrl
-                        });
-                    }
-                } catch (err) {
-                    console.log(`[NetCine] Erro no player ${i + 1}: ${err.message}`);
-                }
-            }
-        }
-    } catch (e) {
-        console.log(`[NetCine] ERRO GERAL: ${e.message}`);
-    }
-
-    console.log(`[NetCine] ✔ ${streams.length} stream(s) retornado(s)`);
-    res.json({ streams });
+  return res.json({ streams: [] });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log('========================================');
-    console.log('NetCine addon iniciado');
-    console.log(`Porta: ${PORT}`);
-    console.log('DNS Customizado: 1.1.1.1');
-    console.log('========================================');
+app.listen(PORT, () => {
+  console.log(`Add-on a executar na porta ${PORT}`);
+  console.log(`Manifesto disponível em: http://localhost:${PORT}/manifest.json`);
 });
