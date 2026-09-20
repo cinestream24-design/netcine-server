@@ -1,17 +1,16 @@
 {
-  "name": "netcine-stremio-addon",
+  "name": "addon-flecha-scraper",
   "version": "1.0.0",
-  "description": "Addon NetCine para Stremio com DNS 1.1.1.1 e proxy de streaming HLS",
+  "description": "Scraper com Puppeteer para bypass de CAPTCHA",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.7.0",
-    "cheerio": "1.0.0-rc.12",
-    "express": "^4.19.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "express": "^4.19.2",
+    "puppeteer": "^22.10.0",
+    "tesseract.js": "^5.1.0",
+    "cheerio": "^1.0.0-rc.12"
   }
 }
