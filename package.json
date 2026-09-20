@@ -1,16 +1,19 @@
 {
   "name": "addon-flecha-scraper",
   "version": "1.0.0",
-  "description": "Scraper com Puppeteer para bypass de CAPTCHA",
+  "description": "Addon Flecha Scraper para Stremio",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "puppeteer": "^22.10.0",
-    "tesseract.js": "^5.1.0",
-    "cheerio": "^1.0.0-rc.12"
+    "axios": "^1.7.7",
+    "express": "^4.21.0",
+    "stremio-addon-sdk": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
