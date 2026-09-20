@@ -221,6 +221,27 @@ app.get('/proxy/seg', async (req, res) => {
     }
 });
 
+// DEBUG: mostra o HTML cru de uma página do site (remova depois de resolver)
+// Exemplo: /debug?path=search/Reacher/
+app.get('/debug', async (req, res) => {
+    const p = req.query.path || '';
+    try {
+        const host = await getHost();
+        const url = new URL(p, host).href;
+        if (new URL(url).host !== new URL(host).host) {
+            return res.status(400).type('text/plain').send('Host não permitido');
+        }
+        const r = await client.get(url, {
+            headers: { 'Referer': BASE },
+            validateStatus: () => true
+        });
+        const body = typeof r.data === 'string' ? r.data : JSON.stringify(r.data);
+        res.type('text/plain').send(`URL: ${url}\nStatus: ${r.status}\nTamanho: ${body.length}\n\n${body.slice(0, 4000)}`);
+    } catch (e) {
+        res.status(500).type('text/plain').send('Erro: ' + e.message);
+    }
+});
+
 // ENDPOINT DE STREAMS DO STREMIO
 app.get('/stream/:type/:id.json', async (req, res) => {
     const { type, id } = req.params;
@@ -252,7 +273,14 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         const searchHtml = await _get(searchUrl);
         const $ = cheerio.load(searchHtml);
 
+        console.log(`[NetCine] Busca respondeu: ${typeof searchHtml === 'string' ? searchHtml.length + ' bytes' : typeof searchHtml} | <title>: ${$('title').first().text().trim()}`);
+
         let pageLink = $('article a, .item a, .result a, .post-title a').first().attr('href');
+
+        if (!pageLink) {
+            const links = $('a[href]').map((i, el) => $(el).attr('href')).get().slice(0, 15);
+            console.log(`[NetCine] Nenhum resultado na busca. Primeiros links: ${links.join(' | ')}`);
+        }
 
         if (pageLink) {
             let fullLink = pageLink.startsWith('http') ? pageLink : new URL(pageLink, host).href;
