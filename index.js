@@ -5,12 +5,41 @@ const https = require('https');
 const http = require('http');
 const dns = require('dns');
 
-// 1. Configura DNS 1.1.1.1 (Cloudflare) globalmente no Node.js
+// ===== DNS CLOUDFLARE (1.1.1.1) =====
+// dns.setServers só afeta dns.resolve*, não dns.lookup (usado pelo axios).
+// Por isso criamos um lookup customizado usando dns.Resolver.
+const DNS_SERVERS = ['1.1.1.1', '1.0.0.1', '8.8.8.8'];
+
+const resolver = new dns.Resolver();
 try {
-    dns.setServers(['1.1.1.1', '1.0.0.1', '8.8.8.8']);
+    resolver.setServers(DNS_SERVERS);
+    dns.setServers(DNS_SERVERS);
     console.log('[NetCine] DNS definido para 1.1.1.1 (Cloudflare)');
 } catch (e) {
     console.log('[NetCine] Aviso ao definir DNS:', e.message);
+}
+
+function customLookup(hostname, options, callback) {
+    if (typeof options === 'function') {
+        callback = options;
+        options = {};
+    }
+    options = options || {};
+    const family = options.family === 6 ? 6 : 4;
+    const resolveFn = family === 6
+        ? resolver.resolve6.bind(resolver)
+        : resolver.resolve4.bind(resolver);
+
+    resolveFn(hostname, (err, addresses) => {
+        if (err || !addresses || addresses.length === 0) {
+            // Se falhar, cai para o DNS padrão do sistema
+            return dns.lookup(hostname, options, callback);
+        }
+        if (options.all) {
+            return callback(null, addresses.map(address => ({ address, family })));
+        }
+        callback(null, addresses[0], family);
+    });
 }
 
 // Previne quedas por exceções não tratadas
@@ -26,14 +55,13 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 let _host = null;
 let _cookies = null;
 
-// Agentes HTTP/HTTPS configurados com o DNS 1.1.1.1
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false,
-    lookup: dns.lookup
+    lookup: customLookup
 });
 
 const httpAgent = new http.Agent({
-    lookup: dns.lookup
+    lookup: customLookup
 });
 
 const client = axios.create({
@@ -112,7 +140,8 @@ app.get('/manifest.json', (req, res) => {
         description: 'Addon NetCine para Stremio (com resolução DNS 1.1.1.1)',
         resources: ['stream'],
         types: ['movie', 'series'],
-        idPrefixes: ['tt']
+        idPrefixes: ['tt'],
+        catalogs: []
     });
 });
 
@@ -131,7 +160,7 @@ app.get('/proxy/playlist', async (req, res) => {
 
     try {
         const hostHeader = req.get('host');
-        const protocol = req.protocol;
+        const protocol = req.get('x-forwarded-proto') || req.protocol;
         const serverHost = `${protocol}://${hostHeader}`;
 
         const response = await client.get(targetUrl, {
@@ -247,7 +276,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
             const playerUrls = [];
             $item('iframe, a.player-option, .embed-selector option').each((i, el) => {
-                const src = $item(el).attr('src') \vert{}\vert{}$item(el).attr('data-src') || $item(el).attr('value') \vert{}\vert{}$item(el).attr('href');
+                const src = $item(el).attr('src') || $item(el).attr('data-src') || $item(el).attr('value') || $item(el).attr('href');
                 if (src && !src.includes('facebook') && !src.includes('google') && !src.includes('disqus')) {
                     const fullSrc = src.startsWith('//') ? `https:${src}` : (src.startsWith('http') ? src : new URL(src, host).href);
                     playerUrls.push(fullSrc);
@@ -257,7 +286,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             console.log(`[NetCine] Players encontrados: ${playerUrls.length}`);
 
             const hostHeader = req.get('host');
-            const protocol = req.protocol;
+            const protocol = req.get('x-forwarded-proto') || req.protocol;
             const serverHost = `${protocol}://${hostHeader}`;
 
             for (let i = 0; i < playerUrls.length; i++) {
@@ -266,11 +295,14 @@ app.get('/stream/:type/:id.json', async (req, res) => {
                     console.log(`[NetCine] Resolvendo player: ${playerUrl}`);
                     const playerHtml = await _get(playerUrl);
 
-                    const m3u8Match = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|php\?token=[^\s"'<>]+))/i) ||
-                                      playerHtml.match(/source\s*:\s*["']([^"']+)["']/i) ||
-                                      playerHtml.match(/file\s*:\s*["']([^"']+)["']/i);
+                    let videoUrl = null;
 
-                    let videoUrl = m3u8Match ? m3u8Match[1] : null;
+                    if (typeof playerHtml === 'string') {
+                        const m3u8Match = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|php\?token=[^\s"'<>]+))/i) ||
+                                          playerHtml.match(/source\s*:\s*["']([^"']+)["']/i) ||
+                                          playerHtml.match(/file\s*:\s*["']([^"']+)["']/i);
+                        videoUrl = m3u8Match ? m3u8Match[1] : null;
+                    }
 
                     if (!videoUrl && playerUrl.includes('hls')) {
                         videoUrl = playerUrl;
@@ -278,7 +310,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
                     if (videoUrl) {
                         const encodedKey = Buffer.from(videoUrl).toString('base64');
-                        const proxyUrl = `${serverHost}/proxy/playlist?key=${encodedKey}`;
+                        const proxyUrl = `${serverHost}/proxy/playlist?key=${encodeURIComponent(encodedKey)}`;
 
                         console.log(`[NetCine] HLS final: ${videoUrl}`);
                         console.log(`[NetCine] Proxy URL: ${proxyUrl}`);
