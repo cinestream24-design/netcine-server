@@ -1,7 +1,7 @@
 {
-  "name": "netcine-addon",
+  "name": "netcine-stremio-addon",
   "version": "1.0.0",
-  "description": "Addon NetCine para Stremio",
+  "description": "Addon NetCine para Stremio com DNS 1.1.1.1 e proxy de streaming HLS",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
