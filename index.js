@@ -26,7 +26,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 let _host = null;
 let _cookies = null;
 
-// Agentes HTTP/HTTPS configurados para usar a resolução do DNS 1.1.1.1
+// Agentes HTTP/HTTPS configurados com o DNS 1.1.1.1
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false,
     lookup: dns.lookup
@@ -58,7 +58,7 @@ async function getMetaFromImdb(id, type) {
     }
 }
 
-// Descobre e atualiza o domínio correto
+// Descobre o domínio principal
 async function getHost() {
     if (_host) return _host;
     try {
@@ -72,7 +72,7 @@ async function getHost() {
     return _host;
 }
 
-// Wrapper do Axios para requisições com cookies e Referer
+// Helper para requisições com cookies
 async function _get(url) {
     const headers = { 'Referer': BASE };
     if (_cookies) headers['Cookie'] = _cookies;
@@ -90,7 +90,7 @@ async function _get(url) {
     return r.data;
 }
 
-// Configuração global de CORS
+// Configuração CORS
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -109,14 +109,14 @@ app.get('/manifest.json', (req, res) => {
         id: 'org.netcine.addon',
         version: '1.0.0',
         name: 'NetCine',
-        description: 'Addon NetCine para Stremio (Resolução DNS 1.1.1.1)',
+        description: 'Addon NetCine para Stremio (com resolução DNS 1.1.1.1)',
         resources: ['stream'],
         types: ['movie', 'series'],
         idPrefixes: ['tt']
     });
 });
 
-// PROXY DA PLAYLIST (.m3u8) - Recebe o link base64 em key e reescreve os segmentos
+// PROXY DE PLAYLIST (.m3u8)
 app.get('/proxy/playlist', async (req, res) => {
     const { key, url: rawUrl } = req.query;
     let targetUrl = '';
@@ -169,7 +169,7 @@ app.get('/proxy/playlist', async (req, res) => {
     }
 });
 
-// PROXY DE SEGMENTOS (.ts) - Retransmite os dados do vídeo diretamente para o Stremio
+// PROXY DE SEGMENTOS (.ts)
 app.get('/proxy/seg', async (req, res) => {
     const { url: segmentUrl } = req.query;
     if (!segmentUrl) return res.status(400).send('URL de segmento não fornecida');
@@ -304,7 +304,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     res.json({ streams });
 });
 
-// Inicialização na porta 8080 em 0.0.0.0 (Compatível com Railway, Koyeb, etc.)
 app.listen(PORT, '0.0.0.0', () => {
     console.log('========================================');
     console.log('NetCine addon iniciado');
