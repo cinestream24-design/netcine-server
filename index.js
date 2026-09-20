@@ -10,7 +10,7 @@ const MANIFEST = {
   id: 'org.flecha.scraper.addon',
   version: '1.0.0',
   name: 'Flecha Lat Scraper',
-  description: 'Add-on para extrair streams do flecha.lat via pesquisa interna',
+  description: 'Add-on para extrair streams de flecha.lat com bypass de CAPTCHA',
   resources: ['stream'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -23,117 +23,115 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/manifest.json', (req, res) => res.json(MANIFEST));
+app.get('/manifest.json', (req, res) => {
+  res.json(MANIFEST);
+});
 
-// Obtém o título e dados do IMDb via Cinemeta
-async function getMediaInfo(id) {
+// Converte o ID IMDb (tt...) para o nome da série/filme via Cinemeta API do Stremio
+async function resolveImdbMeta(id) {
   try {
     const parts = id.split(':');
     const imdbId = parts[0];
-    const season = parts[1] ? parseInt(parts[1], 10) : null;
-    const episode = parts[2] ? parseInt(parts[2], 10) : null;
+    const season = parts[1] ? String(parts[1]).padStart(2, '0') : null;
+    const episode = parts[2] ? String(parts[2]).padStart(2, '0') : null;
+
     const type = season ? 'series' : 'movie';
+    const response = await axios.get(`https://v3-cinemeta.strem.fun/meta/${type}/${imdbId}.json`);
+    
+    const name = response.data?.meta?.name;
+    if (!name) return null;
 
-    const res = await axios.get(`https://v3-cinemeta.strem.fun/meta/${type}/${imdbId}.json`);
-    const name = res.data?.meta?.name;
+    // Formata o slug (ex: reacher-01x01)
+    const cleanName = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 
-    return { name, season, episode, type };
+    if (type === 'series') {
+      return `${cleanName}-${season}x${episode}`;
+    }
+    return cleanName;
   } catch (err) {
-    console.error('[Cinemeta] Erro ao obter metadados:', err.message);
+    console.error('[Meta] Erro ao resolver ID IMDb:', err.message);
     return null;
   }
 }
 
-async function searchAndExtractStream(media) {
+async function extractStreamUrl(episodeSlug) {
   let streamUrl = null;
+  const episodeUrl = `https://flecha.lat/episode/${episodeSlug}/`;
 
   const browser = await puppeteer.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu'
+    ]
   });
 
   const page = await browser.newPage();
 
   try {
-    // Intercetador de pedidos para capturar o link do vídeo (.m3u8 / .mp4)
     page.on('request', (request) => {
       const url = request.url();
-      if ((url.includes('.m3u8') || url.includes('.mp4')) && !url.includes('captcha')) {
+      if (url.includes('.m3u8') || (url.includes('.mp4') && !url.includes('captcha'))) {
         streamUrl = url;
       }
     });
 
-    // 1. Aceder à página inicial / pesquisa do flecha.lat
-    const searchUrl = `https://flecha.lat/?s=${encodeURIComponent(media.name)}`;
-    console.log(`[Puppeteer] A pesquisar por "${media.name}" em: ${searchUrl}`);
-    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+    console.log(`[Puppeteer] A navegar até: ${episodeUrl}`);
+    const response = await page.goto(episodeUrl, { waitUntil: 'networkidle2', timeout: 60000 });
 
-    // 2. Clicar no primeiro resultado correspondente ao filme/série
-    const itemSelector = '.result-item a, .search-page a, article a';
-    const foundLink = await page.evaluate((title) => {
-      const links = Array.from(document.querySelectorAll('a'));
-      const match = links.find(l => l.innerText.toLowerCase().includes(title.toLowerCase()));
-      return match ? match.href : null;
-    }, media.name);
-
-    if (!foundLink) {
-      console.log(`[Puppeteer] NENHUM resultado encontrado para "${media.name}".`);
+    if (response.status() === 404) {
+      console.log(`[Puppeteer] Página não encontrada (404) para a URL: ${episodeUrl}`);
       await browser.close();
       return null;
     }
 
-    console.log(`[Puppeteer] Página do título encontrada: ${foundLink}`);
-    await page.goto(foundLink, { waitUntil: 'networkidle2', timeout: 45000 });
+    const captchaInputSelector = 'input[placeholder="Código"], input[type="text"]';
+    const validateBtnSelector = 'button, input[type="submit"], input[value="Validar"]';
 
-    // 3. Se for série, navegar até à temporada e episódio corretos
-    if (media.type === 'series' && media.season && media.episode) {
-      console.log(`[Puppeteer] A procurar Temporada ${media.season}, Episódio ${media.episode}...`);
+    const hasCaptchaInput = await page.$(captchaInputSelector);
+
+    if (hasCaptchaInput) {
+      console.log('[Puppeteer] Verificação Humana detetada. A capturar imagem do CAPTCHA...');
+
+      // Seleciona especificamente o elemento da imagem do CAPTCHA
+      const captchaImgElement = await page.$('img[src*="captcha"], .captcha-area img, form img');
       
-      const epSelector = `a[href*="-${media.season}x${media.episode}"], a[href*="season-${media.season}-episode-${media.episode}"]`;
-      const epElement = await page.$(epSelector);
+      if (captchaImgElement) {
+        const imageBuffer = await captchaImgElement.screenshot();
 
-      if (epElement) {
-        await Promise.all([
-          epElement.click(),
-          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {})
-        ]);
-      } else {
-        console.log(`[Puppeteer] Episódio T${media.season}E${media.episode} não localizado na página.`);
+        const worker = await createWorker('eng');
+        const { data: { text } } = await worker.recognize(imageBuffer);
+        await worker.terminate();
+
+        const cleanedCode = text.replace(/[^a-zA-Z0-9]/g, '').trim();
+        console.log(`[OCR] Código lido do CAPTCHA: ${cleanedCode}`);
+
+        if (cleanedCode) {
+          await page.type(captchaInputSelector, cleanedCode);
+          
+          await Promise.all([
+            page.evaluate(() => {
+              const btns = Array.from(document.querySelectorAll('button, input[type="submit"], .btn'));
+              const validateBtn = btns.find(b => b.textContent.includes('Validar') || b.value === 'Validar');
+              if (validateBtn) validateBtn.click();
+            }),
+            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
+          ]);
+        }
       }
     }
 
-    // 4. Detetar e resolver CAPTCHA se estiver presente
-    const captchaImgSelector = 'img[src*="captcha"], .captcha img';
-    const captchaInputSelector = 'input[placeholder*="Código"], input[type="text"]';
-
-    const captchaImg = await page.$(captchaImgSelector);
-    if (captchaImg) {
-      console.log('[Puppeteer] CAPTCHA detetado. A resolver...');
-      const imageBuffer = await captchaImg.screenshot();
-
-      const worker = await createWorker('eng');
-      const { data: { text } } = await worker.recognize(imageBuffer);
-      await worker.terminate();
-
-      const code = text.replace(/[^a-zA-Z0-9]/g, '').trim();
-      console.log(`[OCR] Código resolvido: ${code}`);
-
-      if (code) {
-        await page.type(captchaInputSelector, code);
-        await page.keyboard.press('Enter');
-        await new Promise(r => setTimeout(r, 3000));
-      }
-    }
-
-    // 5. Aguardar captura da URL de vídeo
     let attempts = 0;
-    while (!streamUrl && attempts < 10) {
-      await new Promise(r => setTimeout(r, 1000));
+    while (!streamUrl && attempts < 12) {
+      await new Promise((r) => setTimeout(r, 1000));
       attempts++;
     }
 
-  } catch (err) {
-    console.error('[Puppeteer] Erro durante a navegação:', err.message);
+  } catch (error) {
+    console.error('[Puppeteer] Erro durante a extração:', error.message);
   } finally {
     await browser.close();
   }
@@ -143,24 +141,34 @@ async function searchAndExtractStream(media) {
 
 app.get('/stream/:type/:id.json', async (req, res) => {
   const { id } = req.params;
-  console.log(`\n[Stremio] Novo pedido para o ID: ${id}`);
+  console.log(`[Stremio] Pedido de stream recebido para o ID: ${id}`);
 
-  const media = await getMediaInfo(id);
-  if (!media) return res.json({ streams: [] });
+  // Resolve o ID do IMDb para o formato de slug do site (ex: reacher-01x01)
+  const episodeSlug = await resolveImdbMeta(id);
 
-  const stream = await searchAndExtractStream(media);
+  if (!episodeSlug) {
+    console.log('[Stremio] Não foi possível converter o ID IMDb.');
+    return res.json({ streams: [] });
+  }
+
+  console.log(`[Stremio] Slug gerado: ${episodeSlug}`);
+  const stream = await extractStreamUrl(episodeSlug);
 
   if (stream) {
     return res.json({
-      streams: [{
-        name: 'Flecha Lat',
-        title: `${media.name} (Auto Search)`,
-        url: stream
-      }]
+      streams: [
+        {
+          name: 'Flecha Lat',
+          title: 'HD (Auto-Bypass CAPTCHA)',
+          url: stream
+        }
+      ]
     });
   }
 
   return res.json({ streams: [] });
 });
 
-app.listen(PORT, () => console.log(`Servidor ativo na porta ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Add-on a executar na porta ${PORT}`);
+});
