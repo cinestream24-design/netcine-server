@@ -78,7 +78,7 @@ const client = axios.create({
 async function getMetaFromImdb(id, type) {
     try {
         const imdbId = id.split(':')[0];
-        const res = await client.get(`https://v3-cinemeta.strem.fun/meta/${type}/${imdbId}.json`);
+        const res = await client.get(`https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`);
         return res.data?.meta || null;
     } catch (e) {
         console.log('[NetCine] Erro ao converter ID IMDB via Cinemeta:', e.message);
