@@ -1,22 +1,29 @@
-const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
+// Polyfill para garantir compatibilidade do objeto File no Node.js
+if (typeof globalThis.File === 'undefined') {
+    const { File } = require('node:buffer');
+    globalThis.File = File;
+}
+
+const express = require('express');
+const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const axios = require('axios');
 const cheerio = require('cheerio');
 
 const BASE_URL = 'https://starckfilmes-v24.com';
 const PORT = process.env.PORT || 7000;
 
-// 1. Configuração do Manifest para o Nuvio/Stremio
+// 1. Configuração do Manifest do Addon para Nuvio / Stremio
 const builder = new addonBuilder({
     id: 'org.netstream.starkfilmes',
     version: '1.0.0',
     name: 'NetStream Addon',
-    description: 'Addon para buscar streams torrent no Stark Filmes',
+    description: 'Buscador de streams torrent para Nuvio e Stremio',
     resources: ['stream'],
     types: ['movie', 'series'],
-    idPrefixes: ['tt'] // Suporta IDs do IMDb (utilizados pelo Nuvio/Stremio)
+    idPrefixes: ['tt']
 });
 
-// Helper de normalização de texto
+// Helper de normalização de texto (remove acentos e pontuações)
 function normalizeText(text) {
     if (!text) return '';
     return text
@@ -36,6 +43,7 @@ const httpClient = axios.create({
     }
 });
 
+// Validação flexível do post encontrado
 function isTargetPost(targetTitle, postTitle, postUrl) {
     const normTarget = normalizeText(targetTitle);
     const normPostTitle = normalizeText(postTitle);
@@ -52,7 +60,7 @@ function isTargetPost(targetTitle, postTitle, postUrl) {
     return (titleMatches / wordsToSearch.length >= 0.4) || (slugMatches / wordsToSearch.length >= 0.4);
 }
 
-// Raspador de Magnets
+// Raspador de links Magnet
 async function scrapeSite(queryTitle) {
     try {
         const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(normalizeText(queryTitle))}`;
@@ -109,19 +117,17 @@ async function scrapeSite(queryTitle) {
             const resMatch = contextText.match(/(2160p|1080p|720p|4k|fhd|hd|web\-dl|bluray|hdr)/i);
             const resolution = resMatch ? resMatch[0].toUpperCase() : '1080P';
 
-            // Extrai o infoHash do magnet link para passar ao formato nativo Stremio
             const hashMatch = targetLink.match(/btih:([a-zA-Z0-9]+)/i);
             const infoHash = hashMatch ? hashMatch[1] : null;
 
             if (infoHash) {
                 streams.push({
                     name: 'NetStream',
-                    title: `${resolution} | ${audioInfo || 'Legendado/Dublado'}`,
+                    title: `${resolution} | ${audioInfo || 'Opção ' + (idx + 1)}`,
                     infoHash: infoHash.toLowerCase(),
                     sources: [targetLink]
                 });
             } else {
-                // Fallback para URI magnet completa caso não consiga extrair o hash
                 streams.push({
                     name: 'NetStream',
                     title: `${resolution} | ${audioInfo || 'Opção ' + (idx + 1)}`,
@@ -137,13 +143,13 @@ async function scrapeSite(queryTitle) {
     }
 }
 
-// 2. Manipulador de Requisição de Streams para o Nuvio/Stremio
+// 2. Manipulador de Requisição de Streams
 builder.defineStreamHandler(async (args) => {
-    // args.id recebe o ID do IMDb ou Cinemeta (ex: tt0848228)
-    // Para simplificar a busca sem API de metadados extra, busca dados via Cinemeta público se necessário:
     try {
         let mediaTitle = '';
-        const metaRes = await axios.get(`https://v3-cinemeta.strem.io/meta/${args.type}/${args.id}.json`);
+        
+        // Consulta o metadado no Cinemeta pelo ID IMDb (ex: tt0848228)
+        const metaRes = await axios.get(`https://v3-cinemeta.strem.io/meta/${args.type}/${args.id.split(':')[0]}.json`);
         
         if (metaRes.data && metaRes.data.meta) {
             mediaTitle = metaRes.data.meta.name;
@@ -162,5 +168,13 @@ builder.defineStreamHandler(async (args) => {
     }
 });
 
-// Inicializa o servidor compativel com o Stremio / Nuvio
-serveHTTP(builder.getInterface(), { port: PORT });
+// 3. Servidor Express com integração do Stremio SDK
+const app = express();
+const addonRouter = getRouter(builder.getInterface());
+
+app.use('/', addonRouter);
+
+app.listen(PORT, () => {
+    console.log(`Addon NetStream rodando na porta ${PORT}`);
+    console.log(`Manifest disponível em: http://localhost:${PORT}/manifest.json`);
+});
