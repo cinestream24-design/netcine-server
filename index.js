@@ -2,23 +2,20 @@ const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-// Configuração do Manifesto exigido pelo Stremio SDK
 const manifest = {
   id: 'org.netcine.stremio.addon',
   version: '1.0.0',
   name: 'NetCine / NetStream',
   description: 'Provedor de streams de filmes e séries via Starck Filmes',
-  resources: ['stream'], // Recursos que este addon fornece
-  types: ['movie', 'series'], // Tipos de conteúdo suportados
-  catalogs: [], // OBRIGATÓRIO: Precisa ser um array (mesmo que vazio se não houver catálogo próprio)
-  idPrefixes: ['tt'] // Suporta IDs do IMDb / Cinemeta
+  resources: ['stream'],
+  types: ['movie', 'series'],
+  catalogs: [],
+  idPrefixes: ['tt']
 };
 
 const builder = new addonBuilder(manifest);
-
 const BASE_URL = 'https://starckfilmes-v24.com';
 
-// Normalizador de texto para comparação de títulos
 function normalizeText(text) {
   if (!text) return '';
   return text
@@ -30,7 +27,6 @@ function normalizeText(text) {
     .trim();
 }
 
-// Busca detalhes do título via TMDB caso precise do nome em Português / Inglês
 async function getTmdbMeta(type, imdbId) {
   try {
     const tmdbApiKey = 'd8e8e85d692358d3b5db2cfd08487457';
@@ -53,15 +49,19 @@ async function getTmdbMeta(type, imdbId) {
       };
     }
   } catch (err) {
-    console.error(`[NetCine] Erro ao buscar meta no TMDB para ${imdbId}:`, err.message);
+    console.error(`[NetCine] Erro TMDB (${imdbId}):`, err.message);
   }
   return null;
 }
 
-// Função para buscar a página do post no site parceiro
-async function searchPostUrl(queryTitle) {
+async function searchPostUrl(queryTitle, season) {
   try {
-    const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(normalizeText(queryTitle))}`;
+    let searchTerm = normalizeText(queryTitle);
+    if (season) {
+      searchTerm += ` ${season} temporada`;
+    }
+
+    const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(searchTerm)}`;
     const { data: html } = await axios.get(searchUrl, {
       timeout: 8000,
       headers: {
@@ -88,8 +88,24 @@ async function searchPostUrl(queryTitle) {
   }
 }
 
-// Extrai links Magnets do post
-async function extractMagnets(postUrl, title) {
+function extractInfoHash(magnetUri) {
+  const match = magnetUri.match(/btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function parseMagnetLink(rawUrl) {
+  if (!rawUrl) return null;
+  if (rawUrl.startsWith('magnet:?')) return rawUrl;
+  
+  // Decodifica magnet oculto em parâmetros de protetores de link
+  if (rawUrl.includes('magnet%3A%3F') || rawUrl.includes('magnet:?')) {
+    const match = rawUrl.match(/(magnet:\?[^&"'<]+)/i) || rawUrl.match(/(magnet%3A%3F[^&"'<]+)/i);
+    if (match) return decodeURIComponent(match[1]);
+  }
+  return null;
+}
+
+async function extractMagnets(postUrl, title, season, episode) {
   try {
     const { data: html } = await axios.get(postUrl, {
       timeout: 8000,
@@ -98,15 +114,26 @@ async function extractMagnets(postUrl, title) {
       }
     });
 
-    const $= cheerio.load(html);$('.related, .recomenda, .voce-pode-gostar, .popular').remove(); // Limpa seções irrelevantes
+    const $= cheerio.load(html);$('.related, .recomenda, .voce-pode-gostar, .popular').remove();
 
     const streams = [];
 
     $('a').each((i, elem) => {
-      const href = $(elem).attr('href') || $(elem).attr('data-magnet') \vert{}\vert{}$(elem).attr('data-link');
-      if (href && href.startsWith('magnet:?')) {
+      const rawHref = $(elem).attr('href') || $(elem).attr('data-magnet') \vert{}\vert{}$(elem).attr('data-link');
+      const magnet = parseMagnetLink(rawHref);
+
+      if (magnet) {
         const parentText = $(elem).parent().text() || '';
         const context = `${$(elem).text()} ${parentText}`.toLowerCase();
+
+        // Filtro de Episódio para Séries
+        if (episode) {
+          const epFormatted = episode.toString().padStart(2, '0');
+          const epRegex = new RegExp(`(e${epFormatted}|ep${epFormatted}|episodio\\s*${episode}|ep\\s*${episode})`, 'i');
+          if (!epRegex.test(context) && !context.includes('temporada completa')) {
+            return;
+          }
+        }
 
         let quality = '720p';
         if (context.includes('4k') || context.includes('2160p')) quality = '4K';
@@ -116,11 +143,13 @@ async function extractMagnets(postUrl, title) {
         if (context.includes('dual') || context.includes('dual audio')) audio = 'Dual Áudio';
         else if (context.includes('legendado')) audio = 'Legendado';
 
+        const infoHash = extractInfoHash(magnet);
+
         streams.push({
           name: 'NetCine / Starck',
-          title: `${title}\nQualidade: ${quality} | Áudio: ${audio}`,
-          infoHash: extractInfoHash(href) || undefined,
-          url: href // Magnet URI direto
+          title: `${title}${episode ? ` (S${season}E${episode})` : ''}\nQualidade: ${quality} | Áudio: ${audio}`,
+          infoHash: infoHash || undefined,
+          url: magnet
         });
       }
     });
@@ -132,48 +161,39 @@ async function extractMagnets(postUrl, title) {
   }
 }
 
-function extractInfoHash(magnetUri) {
-  const match = magnetUri.match(/btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i);
-  return match ? match[1].toLowerCase() : null;
-}
-
-// Handler principal do recurso 'stream' do Stremio
 builder.defineStreamHandler(async ({ type, id }) => {
   console.log(`[NetCine] Solicitação de stream para ${type} ID: ${id}`);
   
   const parts = id.split(':');
   const imdbId = parts[0];
-  const season = parts[1];
-  const episode = parts[2];
+  const season = parts[1] || null;
+  const episode = parts[2] || null;
 
   const meta = await getTmdbMeta(type, imdbId);
   if (!meta) {
     return { streams: [] };
   }
 
-  let searchTitle = meta.title;
-  let postUrl = await searchPostUrl(searchTitle);
+  let postUrl = await searchPostUrl(meta.title, season);
 
-  // Fallback para o título original em inglês se a busca em português falhar
   if (!postUrl && meta.originalTitle && meta.originalTitle !== meta.title) {
-    postUrl = await searchPostUrl(meta.originalTitle);
+    postUrl = await searchPostUrl(meta.originalTitle, season);
   }
 
   if (!postUrl) {
     return { streams: [] };
   }
 
-  const streams = await extractMagnets(postUrl, meta.title);
+  const streams = await extractMagnets(postUrl, meta.title, season, episode);
   return { streams };
 });
 
-// Inicialização da porta e do servidor do SDK
 const PORT = process.env.PORT || 7000;
 
 serveHTTP(builder.getInterface(), { port: PORT })
   .then(() => {
-    console.log(`[NetCine Addon] Servidor rodando com sucesso em http://localhost:${PORT}/manifest.json`);
+    console.log(`[NetCine Addon] Servidor rodando em http://localhost:${PORT}/manifest.json`);
   })
   .catch((err) => {
-    console.error('[NetCine Addon] Erro ao iniciar o servidor:', err);
+    console.error('[NetCine Addon] Erro ao iniciar servidor:', err);
   });
