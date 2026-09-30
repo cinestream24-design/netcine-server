@@ -7,7 +7,11 @@ const BASE_URL = 'https://starckfilmes-v24.com';
 // Defina TMDB_API_KEY nas variáveis de ambiente e depois remova o fallback abaixo
 const TMDB_API_KEY = process.env.TMDB_API_KEY || 'd8e8e85d692358d3b5db2cfd08487457';
 
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const HTTP_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
+};
 
 // 1. Definição do Manifest do Stremio
 const manifest = {
@@ -24,7 +28,8 @@ const manifest = {
 // 2. Instância do builder
 const builder = new addonBuilder(manifest);
 
-// Função auxiliar para limpar e normalizar textos de busca
+// ---------- Utilidades ----------
+
 function normalizeText(str) {
   if (!str) return '';
   return str
@@ -34,7 +39,25 @@ function normalizeText(str) {
     .trim();
 }
 
-// Busca o nome do filme/série na API do TMDB usando o ID do IMDb
+function slugify(str) {
+  return normalizeText(str).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function postSlug(url) {
+  const m = (url || '').match(/\/catalog\/([^/?#]+)/);
+  return m ? m[1] : '';
+}
+
+function safeDecode(str) {
+  try {
+    return decodeURIComponent((str || '').replace(/\+/g, ' '));
+  } catch (e) {
+    return str || '';
+  }
+}
+
+// ---------- TMDB: converte o ID do IMDb no título ----------
+
 async function getTmdbMeta(type, imdbId) {
   try {
     const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id&language=pt-BR`;
@@ -42,16 +65,10 @@ async function getTmdbMeta(type, imdbId) {
 
     if (type === 'movie' && res.data.movie_results && res.data.movie_results.length > 0) {
       const movie = res.data.movie_results[0];
-      return {
-        title: movie.title,
-        originalTitle: movie.original_title
-      };
+      return { title: movie.title, originalTitle: movie.original_title };
     } else if (type === 'series' && res.data.tv_results && res.data.tv_results.length > 0) {
       const tv = res.data.tv_results[0];
-      return {
-        title: tv.name,
-        originalTitle: tv.original_name
-      };
+      return { title: tv.name, originalTitle: tv.original_name };
     }
   } catch (err) {
     console.error(`[NetCine] Erro TMDB (${imdbId}):`, err.message);
@@ -59,87 +76,123 @@ async function getTmdbMeta(type, imdbId) {
   return null;
 }
 
-// Pesquisa no site pelo post do filme/série
-async function searchPostUrl(queryTitle) {
+// ---------- Busca no site (pelo título normal) ----------
+
+async function searchPosts(queryTitle) {
+  const term = (queryTitle || '').trim();
+  if (!term) return [];
+
+  const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(term)}`;
+  console.log(`[NetCine] Pesquisando no site: ${searchUrl}`);
+
   try {
-    const searchTerm = (queryTitle || '').trim();
-    const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(searchTerm)}`;
-
-    console.log(`[NetCine] Pesquisando no site: ${searchUrl}`);
-
-    const { data: html } = await axios.get(searchUrl, {
-      timeout: 8000,
-      headers: { 'User-Agent': USER_AGENT }
-    });
-
+    const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS });
     const $ = cheerio.load(html);
-    let targetUrl = null;
 
-    $('article a, .item-single a, h2 a').each((_, elem) => {
-      if (targetUrl) return;
-      const href = $(elem).attr('href');
-      if (href && href.includes(BASE_URL) && !href.includes('/categoria/') && !href.includes('/tag/') && !href.includes('/?s=')) {
-        targetUrl = href;
-      }
+    const seen = new Set();
+    const posts = [];
+
+    // Os posts do site ficam todos em /catalog/<slug>/
+    $('a[href*="/catalog/"]').each((_, elem) => {
+      let href = $(elem).attr('href');
+      if (!href) return;
+      if (href.startsWith('/')) href = BASE_URL + href;
+      if (!href.startsWith(BASE_URL)) return;
+      if (seen.has(href)) return;
+      seen.add(href);
+
+      const title = ($(elem).attr('title') || $(elem).text() || '').trim();
+      posts.push({ url: href, title });
     });
 
-    return targetUrl;
+    console.log(`[NetCine] ${posts.length} posts encontrados para "${term}"`);
+    if (posts.length === 0) {
+      console.log(`[NetCine] HTML recebido (${html.length} chars): ${html.slice(0, 300).replace(/\s+/g, ' ')}`);
+    }
+    return posts;
   } catch (err) {
     console.error(`[NetCine] Erro na busca HTTP:`, err.message);
-    return null;
+    return [];
   }
 }
 
-// Extrai links magnet/torrent da página encontrada
-async function extractMagnets(postUrl, title, season, episode) {
+// Escolhe o post certo (mesmo título e, para série, a temporada certa)
+function pickPost(posts, titles, season) {
+  const titleSlugs = titles.map(slugify).filter(Boolean);
+
+  const candidates = posts.filter((p) => {
+    const s = postSlug(p.url);
+    return titleSlugs.some((t) => s === t || s.startsWith(t + '-'));
+  });
+
+  if (season) {
+    const re = new RegExp(`(^|-)${parseInt(season, 10)}-temporada`);
+    const found = candidates.find((p) => re.test(postSlug(p.url)));
+    return found ? found.url : null;
+  }
+
+  const movie = candidates.find((p) => !/temporada/.test(postSlug(p.url)));
+  return movie ? movie.url : null;
+}
+
+// ---------- Extração dos magnets ----------
+
+// Descobre quais episódios o link cobre: "EPISÓDIOS 01 AO 03:" -> [1,3], "EPISÓDIO 04:" -> [4,4]
+function parseEpisodeRange(label, dn) {
+  let m = (label || '').match(/EPIS[OÓó]DIOS?\s*(\d+)(?:\s*(?:AO?|AT[ÉEé]|-)\s*(\d+))?/i);
+  if (m) {
+    const a = parseInt(m[1], 10);
+    const b = m[2] ? parseInt(m[2], 10) : a;
+    return [Math.min(a, b), Math.max(a, b)];
+  }
+
+  m = (dn || '').match(/S\d+E(\d+(?:-\d+)*)/i);
+  if (m) {
+    const nums = m[1].split('-').map((n) => parseInt(n, 10));
+    return [Math.min(...nums), Math.max(...nums)];
+  }
+
+  return null;
+}
+
+async function extractMagnets(postUrl, season, episode) {
   const streams = [];
   try {
-    const { data: html } = await axios.get(postUrl, {
-      timeout: 8000,
-      headers: { 'User-Agent': USER_AGENT }
-    });
-
+    const { data: html } = await axios.get(postUrl, { timeout: 10000, headers: HTTP_HEADERS });
     const $ = cheerio.load(html);
 
-    const all = [];
-
     $('a[href^="magnet:"]').each((index, elem) => {
-      const magnetUrl = $(elem).attr('href');
-      const linkText = $(elem).text().trim() || $(elem).parent().text().trim();
-      all.push({ magnetUrl, linkText, index });
-    });
+      const $a = $(elem);
+      const magnetUrl = $a.attr('href');
+      const $p = $a.closest('p');
 
-    let selected = all;
+      const dn = safeDecode((magnetUrl.match(/[?&]dn=([^&]+)/) || [])[1] || '');
+      let label = ($p.find('strong').first().text() || '').replace(/\s+/g, ' ').replace(/:\s*$/, '').trim();
+      if (!label) label = $a.parent().text().replace(/\s+/g, ' ').trim();
+      const quality = $a.text().replace(/\s+/g, ' ').trim();
+      const version = $p.prevAll('h3').first().text().replace(/\s+/g, ' ').trim();
 
-    // Se for série, tenta filtrar pelo episódio; se não achar nada, mostra todos
-    if (season && episode) {
-      const ep = parseInt(episode, 10);
-      const epRegex = new RegExp(`(^|[^0-9])(E|EP|EPIS[OÓ]DIO)?\\s*0?${ep}([^0-9]|$)`, 'i');
-      const filtered = all.filter(({ magnetUrl, linkText }) => {
-        let dn = '';
-        try {
-          dn = decodeURIComponent((magnetUrl.match(/dn=([^&]+)/) || [])[1] || '');
-        } catch (e) {}
-        return epRegex.test(linkText) || epRegex.test(dn);
-      });
-      if (filtered.length > 0) selected = filtered;
-    }
+      // Série: só mostra o episódio pedido (ou pacotes que o incluem)
+      if (season && episode) {
+        const range = parseEpisodeRange(label, dn);
+        const ep = parseInt(episode, 10);
+        if (range && (ep < range[0] || ep > range[1])) return;
+      }
 
-    selected.forEach(({ magnetUrl, linkText, index }) => {
+      const line1 = [label || `Opção ${index + 1}`, quality].filter(Boolean).join(' · ');
       streams.push({
         name: 'NetCine',
-        title: linkText || `Opção ${index + 1}`,
+        title: [line1, version].filter(Boolean).join('\n'),
         externalUrl: magnetUrl
       });
     });
-
   } catch (err) {
     console.error(`[NetCine] Erro ao extrair magnets:`, err.message);
   }
   return streams;
 }
 
-// 3. Handler principal de busca do Stremio
+// 3. Handler principal do Stremio / Nuvio
 builder.defineStreamHandler(async ({ type, id }) => {
   console.log(`[NetCine] Solicitação de stream para ${type} ID: ${id}`);
 
@@ -156,20 +209,34 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
   console.log(`[NetCine] Título traduzido: "${meta.title}" | Original: "${meta.originalTitle}"`);
 
-  // Pesquisa no site pelo título normal (o ID só serve para descobrir o título no TMDB)
-  let postUrl = await searchPostUrl(meta.title);
+  const titles = [meta.title];
+  if (meta.originalTitle && meta.originalTitle !== meta.title) titles.push(meta.originalTitle);
 
-  if (!postUrl && meta.originalTitle && meta.originalTitle !== meta.title) {
-    postUrl = await searchPostUrl(meta.originalTitle);
+  // 1) Busca pelo título normal
+  let postUrl = null;
+  for (const t of titles) {
+    const posts = await searchPosts(t);
+    postUrl = pickPost(posts, titles, season);
+    if (postUrl) break;
+  }
+
+  // 2) Série sem a temporada na lista: tenta "Título N temporada"
+  if (!postUrl && season) {
+    for (const t of titles) {
+      const posts = await searchPosts(`${t} ${season} temporada`);
+      postUrl = pickPost(posts, titles, season);
+      if (postUrl) break;
+    }
   }
 
   if (!postUrl) {
-    console.log(`[NetCine] Nenhum post encontrado para: ${meta.title}`);
+    console.log(`[NetCine] Nenhum post encontrado para: ${meta.title}${season ? ' temporada ' + season : ''}`);
     return { streams: [] };
   }
 
   console.log(`[NetCine] Post encontrado: ${postUrl}`);
-  const streams = await extractMagnets(postUrl, meta.title, season, episode);
+  const streams = await extractMagnets(postUrl, season, episode);
+  console.log(`[NetCine] ${streams.length} link(s) magnet retornados`);
   return { streams };
 });
 
