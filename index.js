@@ -216,18 +216,25 @@ function makeItem(rawMagnet, context, postAudio, siteName, requireDnDual = false
   const dn = clean(safeDecode((magnetUrl.match(/[?&]dn=([^&]+)/) || [])[1] || ''));
   const xl = ((rawMagnet || '').match(/[?&](?:amp;)?xl=(\d+)/) || [])[1];
 
-  // Só Dual Áudio: descarta dublado, legendado e áudio não informado
+  // Descarta legendado e áudio não informado (Dual x Dublado é decidido pela configuração)
   if (requireDnDual) {
     const a = detectAudio(dn);
-    if (!a || a.rank !== 0) return null;
+    if (!a || a.rank > 1) return null;
   }
 
   const info = parseInfo(dn, context, xl, postAudio);
-  if (info.audio.rank !== 0) return null;
+  if (info.audio.rank > 1) return null;
+
+  let sizeBytes = Number(xl) || 0;
+  if (!sizeBytes) {
+    const sm = `${dn} ${context}`.match(/(\d+(?:[.,]\d+)?)\s*(GB|MB)/i);
+    if (sm) sizeBytes = parseFloat(sm[1].replace(',', '.')) * (sm[2].toUpperCase() === 'GB' ? 1024 ** 3 : 1024 ** 2);
+  }
 
   return {
     hash,
     source: siteName,
+    sizeBytes,
     res: info.res,
     audioRank: info.audio.rank,
     resRank: RES_RANK[info.res] !== undefined ? RES_RANK[info.res] : -1,
@@ -324,7 +331,7 @@ function pickStarckCandidates(posts, titles, year) {
       const audio = detectAudio(`${p.audioType} ${p.title} ${postSlug(p.url)}`);
       return { url: p.url, rank: audio ? audio.rank : 3 };
     })
-    .filter((c) => c.rank === 0 || c.rank === 3)
+    .filter((c) => c.rank <= 1 || c.rank === 3)
     .sort((a, b) => a.rank - b.rank)
     .map((c) => c.url);
 }
@@ -338,7 +345,7 @@ async function extractStarckMagnets(postUrl) {
     const $ = cheerio.load(html);
 
     const postAudio = detectAudio(clean($('h1').first().text()));
-    if (postAudio && postAudio.rank !== 0) {
+    if (postAudio && postAudio.rank === 2) {
       return [];
     }
 
@@ -406,7 +413,7 @@ function pickStarckNetCandidates(posts, titles, year) {
       const audio = detectAudio(p.meta);
       return { url: p.url, rank: audio ? audio.rank : 3 };
     })
-    .filter((c) => c.rank === 0 || c.rank === 3)
+    .filter((c) => c.rank <= 1 || c.rank === 3)
     .sort((a, b) => a.rank - b.rank)
     .map((c) => c.url);
 }
@@ -550,7 +557,7 @@ function pickComandoCandidates(posts, titles, year) {
       const audio = detectAudio(`${p.title} ${p.metaText}`);
       return { url: p.url, rank: audio ? audio.rank : 3 };
     })
-    .filter((c) => c.rank === 0 || c.rank === 3)
+    .filter((c) => c.rank <= 1 || c.rank === 3)
     .sort((a, b) => a.rank - b.rank)
     .map((c) => c.url);
 }
@@ -567,8 +574,8 @@ async function extractComandoMagnets(postUrl, imdbId) {
 
     const $ = cheerio.load(html);
     const postAudio = detectAudio(clean($('h1').text() + ' ' + $('title').text()));
-    if (postAudio && postAudio.rank !== 0) {
-      console.log(`[Comando] Post sem dual áudio ignorado: ${postUrl}`);
+    if (postAudio && postAudio.rank === 2) {
+      console.log(`[Comando] Post legendado ignorado: ${postUrl}`);
       return [];
     }
 
@@ -723,12 +730,51 @@ const SOURCES = [
   { key: 'comando', name: COMANDO_NAME, fetch: (titles, meta, imdbId) => getFromComando(titles, meta, imdbId) }
 ];
 
-// Addon único: junta as 3 fontes (manifest na raiz)
+const DEFAULT_CONFIG = {
+  sources: SOURCES.map((x) => x.key),
+  audio: 'dual',                      // 'dual' | 'dual+dub'
+  minRes: -1,                         // -1 todas | 1 = 720p+ | 2 = 1080p+ | 4 = só 4K
+  maxRes: -1,                         // -1 sem limite | 1 = até 720p | 2 = até 1080p
+  maxGB: 0,                           // 0 sem limite
+  minSeeds: HIDE_DEAD ? 1 : -1,       // -1 mostra todos (inclusive 0 seeds)
+  sort: 'res',                        // 'res' | 'seeds' | 'size'
+  limit: 0,                           // links por fonte (0 = todos)
+  showFile: true                      // mostra o nome do arquivo no card
+};
+
+function parseConfig(b64) {
+  try {
+    const json = Buffer.from(b64.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const raw = JSON.parse(json);
+    const d = DEFAULT_CONFIG;
+    const keys = SOURCES.map((x) => x.key);
+    const sources = Array.isArray(raw.sources) ? raw.sources.filter((k) => keys.includes(k)) : keys;
+    const pick = (v, allowed, def) => (allowed.includes(v) ? v : def);
+    let minSeeds = pick(raw.minSeeds, [-1, 1, 5, 20], d.minSeeds);
+    if (raw.minSeeds === undefined && typeof raw.hideDead === 'boolean') minSeeds = raw.hideDead ? 1 : -1;
+    return {
+      sources: sources.length ? sources : keys,
+      audio: pick(raw.audio, ['dual', 'dual+dub'], d.audio),
+      minRes: pick(raw.minRes, [-1, 1, 2, 4], d.minRes),
+      maxRes: pick(raw.maxRes, [-1, 1, 2], d.maxRes),
+      maxGB: pick(raw.maxGB, [0, 5, 10, 20], d.maxGB),
+      minSeeds,
+      sort: pick(raw.sort, ['res', 'seeds', 'size'], d.sort),
+      limit: pick(raw.limit, [0, 3, 5, 10], d.limit),
+      showFile: typeof raw.showFile === 'boolean' ? raw.showFile : d.showFile
+    };
+  } catch (e) {
+    return DEFAULT_CONFIG;
+  }
+}
+
+// Addon único: junta as fontes escolhidas (manifest na raiz)
 const ALL_SOURCE = {
   key: 'all',
   name: 'Victor / NetStream',
-  fetch: async (titles, meta, imdbId) => {
-    const lists = await Promise.all(SOURCES.map((s) => s.fetch(titles, meta, imdbId).catch(() => [])));
+  fetch: async (titles, meta, imdbId, cfg = DEFAULT_CONFIG) => {
+    const active = SOURCES.filter((x) => cfg.sources.includes(x.key));
+    const lists = await Promise.all(active.map((x) => x.fetch(titles, meta, imdbId).catch(() => [])));
     return lists.flat();
   }
 };
@@ -742,7 +788,8 @@ function buildManifest(src) {
     resources: ['stream'],
     types: ['movie'],
     idPrefixes: ['tt'],
-    catalogs: []
+    catalogs: [],
+    behaviorHints: { configurable: true }
   };
 }
 
@@ -763,10 +810,10 @@ function getMeta(imdbId) {
 const resultCache = new Map();
 const RESULT_CACHE_TTL = 10 * 60 * 1000;
 
-async function handleStream(src, imdbId) {
+async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
   console.log(`[${src.name}] Solicitação de stream para ${imdbId}`);
 
-  const cacheKey = `${src.key}:${imdbId}`;
+  const cacheKey = `${src.key}:${imdbId}:${JSON.stringify(cfg)}`;
   const cached = resultCache.get(cacheKey);
   if (cached && Date.now() - cached.at < RESULT_CACHE_TTL) return cached.data;
 
@@ -780,13 +827,13 @@ async function handleStream(src, imdbId) {
 
   let items = [];
   try {
-    items = await src.fetch(titles, meta, imdbId);
+    items = await src.fetch(titles, meta, imdbId, cfg);
   } catch (err) {
     console.error(`[${src.name}] Erro inesperado:`, err.message);
   }
 
   // Remover duplicados por hash
-  const unique = [];
+  let unique = [];
   const seenHashes = new Set();
   for (const item of items) {
     if (!seenHashes.has(item.hash)) {
@@ -794,6 +841,12 @@ async function handleStream(src, imdbId) {
       unique.push(item);
     }
   }
+
+  // Filtros da configuração: tipo de áudio e qualidade mínima
+  unique = unique.filter((i) => (cfg.audio === 'dual' ? i.audioRank === 0 : i.audioRank <= 1));
+  if (cfg.minRes >= 0) unique = unique.filter((i) => i.resRank >= cfg.minRes);
+  if (cfg.maxRes >= 0) unique = unique.filter((i) => i.resRank <= cfg.maxRes);
+  if (cfg.maxGB > 0) unique = unique.filter((i) => !i.sizeBytes || i.sizeBytes <= cfg.maxGB * 1024 ** 3);
 
   // Verifica seeds em paralelo e marca no título de cada link
   if (SEED_CHECK) {
@@ -811,27 +864,42 @@ async function handleStream(src, imdbId) {
   }
 
   let finalItems = unique;
-  if (SEED_CHECK && HIDE_DEAD) finalItems = unique.filter((i) => i.seeds !== 0);
+  if (SEED_CHECK && cfg.minSeeds > 0) {
+    finalItems = unique.filter((i) => i.seeds === null || i.seeds === undefined || i.seeds >= cfg.minSeeds);
+  }
 
-  // Ordenar: agrupa por fonte (Starck > StarckNet > Comando); dentro de cada fonte,
-  // sem seeds por último, depois resolução (2160p > 1080p > ...) e mais seeds
+  // Ordenar: agrupa por fonte; dentro dela, sem seeds por último, áudio e critério escolhido
   const SOURCE_ORDER = SOURCES.map((x) => x.name);
   const sourceRank = (i) => {
     const idx = SOURCE_ORDER.indexOf(i.source);
     return idx < 0 ? SOURCE_ORDER.length : idx;
   };
   const deadFlag = (i) => (i.seeds === 0 ? 1 : 0);
+  const seedsOf = (i) => i.seeds || 0;
+  const sizeOf = (i) => i.sizeBytes || Infinity;
   finalItems.sort((a, b) => {
     if (sourceRank(a) !== sourceRank(b)) return sourceRank(a) - sourceRank(b);
     if (deadFlag(a) !== deadFlag(b)) return deadFlag(a) - deadFlag(b);
+    if (a.audioRank !== b.audioRank) return a.audioRank - b.audioRank;
+    if (cfg.sort === 'seeds' && seedsOf(a) !== seedsOf(b)) return seedsOf(b) - seedsOf(a);
+    if (cfg.sort === 'size' && sizeOf(a) !== sizeOf(b)) return sizeOf(a) - sizeOf(b);
     if (a.resRank !== b.resRank) return b.resRank - a.resRank;
-    return (b.seeds || 0) - (a.seeds || 0);
+    return seedsOf(b) - seedsOf(a);
   });
+
+  if (cfg.limit > 0) {
+    const cnt = {};
+    finalItems = finalItems.filter((i) => {
+      cnt[i.source] = (cnt[i.source] || 0) + 1;
+      return cnt[i.source] <= cfg.limit;
+    });
+  }
 
   // Nome em negrito: Título do filme em PT-BR | qualidade
   const streams = finalItems.map((item) => {
-    item.stream.name = `${meta.title}${item.res ? ' | ' + item.res : ''}`;
-    return item.stream;
+    const out = { ...item.stream, name: `${meta.title}${item.res ? ' | ' + item.res : ''}` };
+    if (!cfg.showFile) out.title = out.title.split('\n').filter((l) => !l.startsWith('📄')).join('\n');
+    return out;
   });
 
   console.log(`[${src.name}] Retornando ${streams.length} streams para ${imdbId}`);
@@ -860,18 +928,119 @@ function esc(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-function landingPage(req) {
-  const host = req.headers.host || 'localhost';
-  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0];
-  const url = `${proto}://${host}/manifest.json`;
-  return '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-    + '<title>Victor / NetStream</title>'
-    + '<body style="font-family:sans-serif;max-width:640px;margin:24px auto;padding:0 16px;word-break:break-all">'
-    + '<h2>Victor / NetStream</h2><p>Link do addon:</p>'
-    + `<p><code>${esc(url)}</code></p>`
-    + `<p><a href="stremio://${esc(host)}/manifest.json">Instalar</a></p>`
-    + '</body>';
+const LANDING_HTML = String.raw`<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0e1014">
+<title>Victor / NetStream</title>
+<style>
+:root{--bg:#0e1014;--card:#171a21;--line:#262b36;--fg:#f2f4f8;--mut:#8b93a4;--acc:#e5b53a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:20px 16px 40px}
+main{max-width:520px;margin:0 auto}
+.hd{display:flex;align-items:center;gap:14px;margin:6px 0 12px}
+.logo{width:54px;height:54px;flex:none}
+h1{font-size:24px;margin:0}
+.sub{color:var(--mut);margin:2px 0 0;font-size:14px}
+.tags{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px}
+.tags span{font-size:12px;color:var(--acc);border:1px solid #3a3320;background:#1c1810;border-radius:99px;padding:4px 10px}
+.cd{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:12px}
+.lb{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:0 0 8px}
+.sl{font-size:13px;color:var(--mut);margin:12px 0 6px}
+.lb+.sl{margin-top:0}
+.sg{display:flex;flex-wrap:wrap;gap:8px}
+.sg button{flex:1 1 auto;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:transparent;color:var(--fg);font:inherit;font-size:14px;cursor:pointer}
+.sg button.on{background:var(--acc);border-color:var(--acc);color:#1a1400;font-weight:700}
+.r{display:flex;align-items:center;gap:12px;width:100%;padding:10px 0;border:0;border-top:1px solid var(--line);background:none;color:var(--fg);font:inherit;text-align:left;cursor:pointer}
+.lb+.r,.cd>.r:first-child{border-top:0}
+.av{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;flex:none}
+.nm{flex:1}
+.nm small{display:block;color:var(--mut);font-size:12px}
+.sw{width:44px;height:26px;border-radius:99px;background:#3a4050;position:relative;flex:none}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff}
+.sw.on{background:var(--acc)}
+.sw.on::after{left:21px}
+.btn{display:block;width:100%;text-align:center;padding:14px;border-radius:12px;font:inherit;font-weight:700;border:0;text-decoration:none;cursor:pointer}
+.pri{background:var(--acc);color:#1a1400}
+.gh{background:transparent;color:var(--fg);border:1px solid var(--line);margin-top:10px}
+code{display:block;word-break:break-all;font-size:12px;color:var(--mut);margin-top:14px}
+ol{margin:0;padding-left:20px;color:var(--mut);font-size:13px}
+</style></head><body><main>
+<div class="hd">
+<svg class="logo" viewBox="0 0 48 48" aria-hidden="true"><rect width="48" height="48" rx="12" fill="#e5b53a"/><path d="M18 13l17 11-17 11z" fill="#1a1400"/><path d="M9 20c2 2 2 6 0 8" stroke="#1a1400" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
+<div><h1>Victor / NetStream</h1><p class="sub">Filmes em Dual Áudio direto no seu app</p></div>
+</div>
+<div class="tags"><span>Dual Áudio</span><span>PT-BR</span><span>Checa seeds</span><span>3 fontes</span></div>
+<div id="app"></div>
+<a id="install" class="btn pri" href="#">Instalar</a>
+<button id="copy" class="btn gh" type="button">Copiar link</button>
+<code id="url"></code>
+<div class="cd" style="margin-top:18px"><div class="lb">Como instalar</div>
+<ol><li>Toque em Instalar, ou copie o link.</li><li>No app, abra Addons e cole o link.</li><li>Abra um filme e escolha o link na lista.</li></ol></div>
+</main>
+<script>
+var SRC = [['starck', 'Starck Filmes', 'S', '#3b82f6'], ['starcknet', 'StarckFilmesNet', 'SN', '#8b5cf6'], ['comando', 'Comando Torrents', 'C', '#ef4444']];
+var OPT = {
+  audio: ['Tipo de áudio', [['dual', 'Só Dual Áudio'], ['dual+dub', 'Dual + Dublado']]],
+  minRes: ['Qualidade mínima', [[-1, 'Todas'], [1, '720p'], [2, '1080p'], [4, '4K']]],
+  maxRes: ['Qualidade máxima', [[-1, 'Sem limite'], [2, '1080p'], [1, '720p']]],
+  maxGB: ['Tamanho máximo', [[0, 'Sem limite'], [5, '5 GB'], [10, '10 GB'], [20, '20 GB']]],
+  minSeeds: ['Seeds mínimos', [[-1, 'Todos'], [1, '1+'], [5, '5+'], [20, '20+']]],
+  sort: ['Ordenar por', [['res', 'Qualidade'], ['seeds', 'Seeds'], ['size', 'Menor tamanho']]],
+  limit: ['Links por fonte', [[0, 'Todos'], [3, '3'], [5, '5'], [10, '10']]]
+};
+var GRP = [['Áudio', ['audio']], ['Qualidade', ['minRes', 'maxRes']], ['Filtros', ['maxGB', 'minSeeds']], ['Organização', ['sort', 'limit']]];
+var st = { sources: ['starck', 'starcknet', 'comando'], audio: 'dual', minRes: -1, maxRes: -1, maxGB: 0, minSeeds: 1, sort: 'res', limit: 0, showFile: true };
+function render() {
+  var h = '<div class="cd"><div class="lb">Fontes</div>';
+  SRC.forEach(function (s) {
+    var on = st.sources.indexOf(s[0]) > -1;
+    h += '<button type="button" class="r" data-src="' + s[0] + '"><span class="av" style="background:' + s[3] + '">' + s[2] + '</span><span class="nm">' + s[1] + '</span><span class="sw' + (on ? ' on' : '') + '"></span></button>';
+  });
+  h += '</div>';
+  GRP.forEach(function (g) {
+    h += '<div class="cd"><div class="lb">' + g[0] + '</div>';
+    g[1].forEach(function (k) {
+      h += '<div class="sl">' + OPT[k][0] + '</div><div class="sg">';
+      OPT[k][1].forEach(function (o) {
+        h += '<button type="button" data-k="' + k + '" data-v="' + o[0] + '"' + (String(st[k]) === String(o[0]) ? ' class="on"' : '') + '>' + o[1] + '</button>';
+      });
+      h += '</div>';
+    });
+    h += '</div>';
+  });
+  h += '<div class="cd"><button type="button" class="r" data-tog="showFile"><span class="nm">Mostrar nome do arquivo<small>Linha com o nome da release em cada link</small></span><span class="sw' + (st.showFile ? ' on' : '') + '"></span></button></div>';
+  document.getElementById('app').innerHTML = h;
+  upd();
 }
+function upd() {
+  var b = btoa(JSON.stringify(st)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  var path = '/c/' + b + '/manifest.json';
+  document.getElementById('url').textContent = location.protocol + '//' + location.host + path;
+  document.getElementById('install').href = 'stremio://' + location.host + path;
+}
+document.getElementById('app').onclick = function (e) {
+  var b = e.target.closest('button');
+  if (!b) return;
+  var d = b.dataset;
+  if (d.src) {
+    var i = st.sources.indexOf(d.src);
+    if (i > -1) { if (st.sources.length > 1) st.sources.splice(i, 1); } else st.sources.push(d.src);
+  } else if (d.tog) {
+    st[d.tog] = !st[d.tog];
+  } else if (d.k) {
+    st[d.k] = isNaN(Number(d.v)) ? d.v : Number(d.v);
+  }
+  render();
+};
+document.getElementById('copy').onclick = function () {
+  var btn = this;
+  if (navigator.clipboard) navigator.clipboard.writeText(document.getElementById('url').textContent);
+  btn.textContent = 'Link copiado!';
+  setTimeout(function () { btn.textContent = 'Copiar link'; }, 1500);
+};
+render();
+</script></body></html>`;
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -882,23 +1051,32 @@ const server = http.createServer(async (req, res) => {
 
     const { pathname } = new URL(req.url, 'http://localhost');
 
-    if (pathname === '/') {
+    const sendLanding = () => {
       res.writeHead(200, { ...CORS_HEADERS, 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(landingPage(req));
-    }
+      return res.end(LANDING_HTML);
+    };
+
+    if (pathname === '/' || pathname === '/configure') return sendLanding();
 
     let src;
     let rest;
-    if (pathname === '/manifest.json' || pathname.startsWith('/stream/')) {
+    let cfg = DEFAULT_CONFIG;
+    const cm = pathname.match(/^\/c\/([A-Za-z0-9_-]+)(\/.*)?$/);
+    if (cm) {
+      src = ALL_SOURCE;
+      cfg = parseConfig(cm[1]);
+      rest = cm[2] || '/';
+    } else if (pathname === '/manifest.json' || pathname.startsWith('/stream/')) {
       src = ALL_SOURCE;
       rest = pathname;
     } else {
       const m = pathname.match(/^\/([a-z0-9]+)(\/.*)?$/);
-      src = m && SOURCES.find((s) => s.key === m[1]);
+      src = m && SOURCES.find((x) => x.key === m[1]);
       if (!src) return sendJson(res, 404, { error: 'Not found' });
       rest = m[2] || '/';
     }
 
+    if (rest === '/configure') return sendLanding();
     if (rest === '/manifest.json') return sendJson(res, 200, manifests[src.key]);
 
     const sm = rest.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
@@ -906,7 +1084,7 @@ const server = http.createServer(async (req, res) => {
       const type = decodeURIComponent(sm[1]);
       const id = decodeURIComponent(sm[2]);
       if (type !== 'movie') return sendJson(res, 200, { streams: [] });
-      return sendJson(res, 200, await handleStream(src, id));
+      return sendJson(res, 200, await handleStream(src, id, cfg));
     }
 
     return sendJson(res, 404, { error: 'Not found' });
