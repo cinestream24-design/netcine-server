@@ -3,6 +3,8 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const dns = require('dns');
 const https = require('https');
+const dgram = require('dgram');
+const crypto = require('crypto');
 
 // DNS da Cloudflare usado SOMENTE nas requisições do Comando Torrents
 const cfResolver = new dns.Resolver();
@@ -42,8 +44,8 @@ const HTTP_HEADERS = {
 // 1. Manifest: este addon atende só FILMES
 const manifest = {
   id: 'org.netcine.addon',
-  version: '1.4.0',
-  name: 'NetCine Addon',
+  version: '1.5.0',
+  name: 'Victor / NetStream',
   description: 'Links magnet de filmes em Dual Áudio',
   resources: ['stream'],
   types: ['movie'],
@@ -233,10 +235,11 @@ function makeItem(rawMagnet, context, postAudio, siteName) {
 
   return {
     hash,
+    source: siteName,
     audioRank: info.audio.rank,
     resRank: RES_RANK[info.res] !== undefined ? RES_RANK[info.res] : -1,
     stream: {
-      name: `NetCine${info.res ? ' ' + info.res : ''}`,
+      name: `NetStream${info.res ? ' | ' + info.res : ''}`,
       title: buildTitle(info, dn, siteName),
       externalUrl: magnetUrl
     }
@@ -613,6 +616,111 @@ async function getFromComando(titles, meta, imdbId) {
 }
 
 // =====================================================================
+// Verificação de seeds (scrape UDP nos trackers)
+// =====================================================================
+
+// SCRAPE_START
+const SEED_CHECK = process.env.SEED_CHECK !== 'false';   // SEED_CHECK=false desliga
+const HIDE_DEAD = process.env.HIDE_DEAD !== 'false';    // links com 0 seeds são escondidos (HIDE_DEAD=false mostra)
+const SCRAPE_TIMEOUT = 3000;
+
+const DEFAULT_TRACKERS = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.tracker.cl:1337/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'udp://exodus.desync.com:6969/announce',
+  'udp://open.stealth.si:80/announce'
+];
+
+function extractTrackers(magnetUrl) {
+  const out = [];
+  const query = magnetUrl.slice(magnetUrl.indexOf('?') + 1);
+  for (const part of query.split('&')) {
+    if (part.startsWith('tr=')) out.push(safeDecode(part.slice(3)));
+  }
+  return out;
+}
+
+function udpScrape(trackerUrl, hashHex, timeoutMs = SCRAPE_TIMEOUT) {
+  return new Promise((resolve) => {
+    let u;
+    try {
+      u = new URL(trackerUrl);
+    } catch (e) {
+      return resolve(null);
+    }
+    if (u.protocol !== 'udp:' || !u.hostname || !u.port) return resolve(null);
+
+    const port = Number(u.port);
+    const host = u.hostname;
+    const connTx = crypto.randomBytes(4);
+    const scrapeTx = crypto.randomBytes(4);
+    const socket = dgram.createSocket('udp4');
+    let done = false;
+    let timer = null;
+
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { socket.close(); } catch (e) { /* ignore */ }
+      resolve(val);
+    };
+
+    timer = setTimeout(() => finish(null), timeoutMs);
+    socket.on('error', () => finish(null));
+
+    socket.on('message', (msg) => {
+      if (msg.length < 8) return;
+      const action = msg.readUInt32BE(0);
+      const tx = msg.subarray(4, 8);
+
+      if (action === 0 && tx.equals(connTx) && msg.length >= 16) {
+        const connId = msg.subarray(8, 16);
+        const act = Buffer.alloc(4);
+        act.writeUInt32BE(2, 0);
+        const req = Buffer.concat([connId, act, scrapeTx, Buffer.from(hashHex, 'hex')]);
+        socket.send(req, port, host, (err) => { if (err) finish(null); });
+      } else if (action === 2 && tx.equals(scrapeTx) && msg.length >= 20) {
+        finish({ seeders: msg.readUInt32BE(8), leechers: msg.readUInt32BE(16) });
+      } else if (action === 3) {
+        finish(null);
+      }
+    });
+
+    // connect request: protocol_id (0x41727101980) + action 0 + transaction_id
+    const connReq = Buffer.alloc(16);
+    connReq.writeUInt32BE(0x417, 0);
+    connReq.writeUInt32BE(0x27101980, 4);
+    connReq.writeUInt32BE(0, 8);
+    connTx.copy(connReq, 12);
+    socket.send(connReq, port, host, (err) => { if (err) finish(null); });
+  });
+}
+
+const seedCache = new Map();
+const SEED_CACHE_TTL = 10 * 60 * 1000;
+
+// Retorna o maior número de seeds encontrado, ou null se nenhum tracker respondeu
+async function getSeeders(hash, magnetUrl) {
+  if (!hash || hash.length !== 40) return null;
+
+  const cached = seedCache.get(hash);
+  if (cached && Date.now() - cached.at < SEED_CACHE_TTL) return cached.seeds;
+
+  const fromMagnet = extractTrackers(magnetUrl).filter((t) => t.startsWith('udp://')).slice(0, 3);
+  const list = [...new Set([...fromMagnet, ...DEFAULT_TRACKERS])].slice(0, 6);
+
+  const results = await Promise.all(list.map((t) => udpScrape(t, hash)));
+  const ok = results.filter(Boolean);
+  const seeds = ok.length ? Math.max(...ok.map((r) => r.seeders)) : null;
+
+  seedCache.set(hash, { seeds, at: Date.now() });
+  return seeds;
+}
+// SCRAPE_END
+
+// =====================================================================
 // Handler principal do Stremio / Nuvio
 // =====================================================================
 
@@ -651,13 +759,41 @@ builder.defineStreamHandler(async ({ type, id }) => {
     }
   }
 
-  // Ordenar: primeiro pelo tipo de áudio (Dual > Dublado), depois pela resolução (2160p > 1080p > ...)
-  uniqueItems.sort((a, b) => {
+  // Verifica seeds em paralelo e marca no título de cada link
+  if (SEED_CHECK) {
+    await Promise.all(uniqueItems.map(async (item) => {
+      try {
+        item.seeds = await getSeeders(item.hash, item.stream.externalUrl);
+      } catch (e) {
+        item.seeds = null;
+      }
+      const lines = item.stream.title.split('\n');
+      if (item.seeds === 0) lines[0] += '  ·  ⚠️ 0 seeds';
+      else if (item.seeds > 0) lines[0] += `  ·  🌱 ${item.seeds} seeds`;
+      item.stream.title = lines.join('\n');
+    }));
+  }
+
+  let finalItems = uniqueItems;
+  if (SEED_CHECK && HIDE_DEAD) finalItems = uniqueItems.filter((i) => i.seeds !== 0);
+
+  // Ordenar: agrupa por fonte (Starck > StarckNet > Comando); dentro de cada fonte,
+  // links sem seeds por último, depois áudio (Dual > Dublado), resolução e seeds
+  const SOURCE_ORDER = [STARCK_NAME, STARCKNET_NAME, COMANDO_NAME];
+  const sourceRank = (i) => {
+    const idx = SOURCE_ORDER.indexOf(i.source);
+    return idx < 0 ? SOURCE_ORDER.length : idx;
+  };
+  const deadFlag = (i) => (i.seeds === 0 ? 1 : 0);
+  finalItems.sort((a, b) => {
+    if (sourceRank(a) !== sourceRank(b)) return sourceRank(a) - sourceRank(b);
+    if (deadFlag(a) !== deadFlag(b)) return deadFlag(a) - deadFlag(b);
     if (a.audioRank !== b.audioRank) return a.audioRank - b.audioRank;
-    return b.resRank - a.resRank;
+    if (a.resRank !== b.resRank) return b.resRank - a.resRank;
+    return (b.seeds || 0) - (a.seeds || 0);
   });
 
-  const streams = uniqueItems.map((item) => item.stream);
+  const streams = finalItems.map((item) => item.stream);
   console.log(`[NetCine] Retornando ${streams.length} streams para ${imdbId}`);
 
   return { streams };
