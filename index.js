@@ -1,6 +1,26 @@
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const dns = require('dns');
+const https = require('https');
+
+// DNS da Cloudflare usado SOMENTE nas requisições do Comando Torrents
+const cfResolver = new dns.Resolver();
+cfResolver.setServers(['1.1.1.1', '1.0.0.1']);
+
+function cloudflareLookup(hostname, options, callback) {
+  cfResolver.resolve4(hostname, (err, addresses) => {
+    if (err || !addresses || !addresses.length) {
+      return dns.lookup(hostname, options, callback);
+    }
+    if (options && options.all) {
+      return callback(null, addresses.map((a) => ({ address: a, family: 4 })));
+    }
+    callback(null, addresses[0], 4);
+  });
+}
+
+const comandoAgent = new https.Agent({ lookup: cloudflareLookup });
 
 // Sites de onde os links são puxados (configuráveis via variáveis de ambiente no Railway)
 const STARCK_URL = (process.env.STARCK_URL || 'https://starckfilmes-v24.com').replace(/\/+$/, '');
@@ -487,7 +507,7 @@ async function searchComando(queryTitle) {
   console.log(`[Comando] Pesquisando: ${searchUrl}`);
 
   try {
-    const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS });
+    const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS, httpsAgent: comandoAgent });
     const $ = cheerio.load(html);
 
     const byUrl = new Map();
@@ -541,7 +561,7 @@ function pickComandoCandidates(posts, titles, year) {
 
 async function extractComandoMagnets(postUrl, imdbId) {
   try {
-    const { data: html } = await axios.get(postUrl, { timeout: 10000, headers: HTTP_HEADERS });
+    const { data: html } = await axios.get(postUrl, { timeout: 10000, headers: HTTP_HEADERS, httpsAgent: comandoAgent });
 
     const pageImdb = (html.match(/imdb\.com\/title\/(tt\d+)/) || [])[1];
     if (pageImdb && imdbId && pageImdb !== imdbId) {
