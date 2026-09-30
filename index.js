@@ -599,51 +599,48 @@ builder.defineStreamHandler(async ({ type, id }) => {
     return { streams: [] };
   }
 
-  const imdbId = id.split(':')[0];
-
+  const imdbId = id;
   const meta = await getTmdbMovie(imdbId);
   if (!meta) {
-    console.log(`[NetCine] Metadados não encontrados no TMDB para ID ${imdbId}`);
+    console.log(`[NetCine] Filme não encontrado no TMDB para o ID: ${imdbId}`);
     return { streams: [] };
   }
 
-  console.log(`[NetCine] Título traduzido: "${meta.title}" | Original: "${meta.originalTitle}" | Ano: ${meta.year}`);
+  const titles = [meta.title, meta.originalTitle].filter(Boolean);
 
-  const titles = [meta.title];
-  if (meta.originalTitle && meta.originalTitle !== meta.title) titles.push(meta.originalTitle);
-
-  // As três fontes são consultadas em paralelo
-  const [fromStarck, fromStarckNet, fromComando] = await Promise.all([
-    getFromStarck(titles, meta).catch((e) => { console.error('[Starck] Erro:', e.message); return []; }),
-    getFromStarckNet(titles, meta, imdbId).catch((e) => { console.error('[StarckNet] Erro:', e.message); return []; }),
-    getFromComando(titles, meta, imdbId).catch((e) => { console.error('[Comando] Erro:', e.message); return []; })
+  const [starckItems, starckNetItems, comandoItems] = await Promise.all([
+    getFromStarck(titles, meta),
+    getFromStarckNet(titles, meta, imdbId),
+    getFromComando(titles, meta, imdbId)
   ]);
 
-  console.log(`[NetCine] Starck: ${fromStarck.length} | StarckNet: ${fromStarckNet.length} | Comando: ${fromComando.length}`);
+  const allItems = [...starckItems, ...starckNetItems, ...comandoItems];
 
-  // Une os resultados, remove torrents duplicados (mesmo hash) e ordena por áudio e resolução
-  const seen = new Set();
-  const all = [...fromStarck, ...fromStarckNet, ...fromComando].filter((i) => {
-    if (seen.has(i.hash)) return false;
-    seen.add(i.hash);
-    return true;
-  });
-  all.sort((a, b) => a.audioRank - b.audioRank || b.resRank - a.resRank);
+  // Remover duplicados por hash mantendo a ordem de adição
+  const uniqueItems = [];
+  const seenHashes = new Set();
 
-  if (all.length === 0) {
-    console.log(`[NetCine] Nenhum link Dual Áudio/Dublado para: ${meta.title}`);
+  for (const item of allItems) {
+    if (!seenHashes.has(item.hash)) {
+      seenHashes.add(item.hash);
+      uniqueItems.push(item);
+    }
   }
-  return { streams: all.map((i) => i.stream) };
+
+  // Ordenar: primeiro pelo tipo de áudio (Dual > Dublado), depois pela resolução (2160p > 1080p > ...)
+  uniqueItems.sort((a, b) => {
+    if (a.audioRank !== b.audioRank) return a.audioRank - b.audioRank;
+    return b.resRank - a.resRank;
+  });
+
+  const streams = uniqueItems.map((item) => item.stream);
+  console.log(`[NetCine] Retornando ${streams.length} streams para ${imdbId}`);
+
+  return { streams };
 });
 
-process.on('uncaughtException', (err) => {
-  console.error('[NetCine Erro Não Tratado]:', err.message);
-});
+const PORT = process.env.PORT || 7000;
 
-process.on('unhandledRejection', (reason) => {
-  console.error('[NetCine Rejeição Não Tratada]:', reason);
+serveHTTP(builder.getInterface(), { port: PORT }).then(() => {
+  console.log(`[NetCine] Addon a rodar na porta ${PORT}`);
 });
-
-const PORT = process.env.PORT || 8080;
-serveHTTP(builder.getInterface(), { port: PORT });
-console.log(`[NetCine Addon] Servidor a executar na porta ${PORT}`);
