@@ -17,7 +17,8 @@ const manifest = {
   description: 'Procura de conteúdos e torrents em português',
   resources: ['stream'],
   types: ['movie', 'series'],
-  idPrefixes: ['tt']
+  idPrefixes: ['tt'],
+  catalogs: []
 };
 
 // 2. Instância do builder
