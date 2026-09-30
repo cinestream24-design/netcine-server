@@ -172,17 +172,39 @@ async function extractMagnets(postUrl, season, episode) {
       const quality = $a.text().replace(/\s+/g, ' ').trim();
       const version = $p.prevAll('h3').first().text().replace(/\s+/g, ' ').trim();
 
+      const ep = episode ? parseInt(episode, 10) : null;
+      const range = season && episode ? parseEpisodeRange(label, dn) : null;
+
       // Série: só mostra o episódio pedido (ou pacotes que o incluem)
-      if (season && episode) {
-        const range = parseEpisodeRange(label, dn);
-        const ep = parseInt(episode, 10);
-        if (range && (ep < range[0] || ep > range[1])) return;
+      if (range && (ep < range[0] || ep > range[1])) return;
+
+      const isPack = !!range && range[1] > range[0];
+      const line1 = [label || `Opção ${index + 1}`, quality].filter(Boolean).join(' · ');
+
+      // 1) Torrent direto: o player abre o arquivo do episódio escolhido dentro do pacote
+      const hashMatch = magnetUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/);
+      if (hashMatch && hashMatch[1].length === 40) {
+        const infoHash = hashMatch[1].toLowerCase();
+        const trackers = [...magnetUrl.matchAll(/[?&]tr=([^&]+)/g)]
+          .map((m) => safeDecode(m[1]).replace(/\/anunciar$/i, '/announce'));
+
+        const torrentStream = {
+          name: 'NetCine',
+          title: isPack
+            ? `▶ Ep ${ep} do pacote (${label})\n${[quality, version].filter(Boolean).join(' · ')}`
+            : `▶ ${[line1, version].filter(Boolean).join('\n')}`,
+          infoHash,
+          sources: trackers.map((t) => `tracker:${t}`).concat([`dht:${infoHash}`])
+        };
+        // Assume que os arquivos do pacote estão em ordem (ep 1, ep 2, ep 3...)
+        if (isPack) torrentStream.fileIdx = ep - range[0];
+        streams.push(torrentStream);
       }
 
-      const line1 = [label || `Opção ${index + 1}`, quality].filter(Boolean).join(' · ');
+      // 2) Link magnet para abrir no app de torrent (mostra todos os arquivos do pacote)
       streams.push({
         name: 'NetCine',
-        title: [line1, version].filter(Boolean).join('\n'),
+        title: `🧲 Abrir magnet: ${[line1, version].filter(Boolean).join('\n')}`,
         externalUrl: magnetUrl
       });
     });
