@@ -1,4 +1,34 @@
-// Busca metadados no TMDB usando o ID do IMDb
+const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
+const axios = require('axios');
+const cheerio = require('cheerio');
+
+const BASE_URL = 'https://starckfilmes-v24.com';
+
+// 1. Definição do Manifest do Stremio
+const manifest = {
+  id: 'org.netcine.addon',
+  version: '1.0.0',
+  name: 'NetCine Addon',
+  description: 'Procura de conteúdos e torrents em português',
+  resources: ['stream'],
+  types: ['movie', 'series'],
+  idPrefixes: ['tt']
+};
+
+// 2. Criar a instância do builder (AQUI fica definido o "builder")
+const builder = new addonBuilder(manifest);
+
+// Função auxiliar para limpar e normalizar textos de busca
+function normalizeText(str) {
+  if (!str) return '';
+  return str
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+// Busca o nome do filme/série na API do TMDB usando o ID do IMDb
 async function getTmdbMeta(type, imdbId) {
   try {
     const tmdbApiKey = 'd8e8e85d692358d3b5db2cfd08487457';
@@ -24,7 +54,7 @@ async function getTmdbMeta(type, imdbId) {
   return null;
 }
 
-// Pesquisa no site o post do filme/série
+// Pesquisa no site pelo post do filme/série
 async function searchPostUrl(queryTitle) {
   try {
     const searchTerm = normalizeText(queryTitle);
@@ -42,7 +72,6 @@ async function searchPostUrl(queryTitle) {
     const $ = cheerio.load(html);
     let targetUrl = null;
 
-    // Procura o primeiro artigo/link de resultado válido
     $('article a, .item-single a, h2 a').each((_, elem) => {
       if (targetUrl) return;
       const href = $(elem).attr('href');
@@ -58,7 +87,44 @@ async function searchPostUrl(queryTitle) {
   }
 }
 
-// Handler de streams atualizado com fallback de títulos
+// Extrai links magnet/torrent da página encontrada
+async function extractMagnets(postUrl, title, season, episode) {
+  const streams = [];
+  try {
+    const { data: html } = await axios.get(postUrl, {
+      timeout: 8000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
+
+    const $ = cheerio.load(html);
+
+    $('a[href^="magnet:"]').each((index, elem) => {
+      const magnetUrl = $(elem).attr('href');
+      const linkText = $(elem).text().trim() \vert{}\vert{}$(elem).parent().text().trim();
+
+      // Filtro para episódios se for série
+      if (season && episode) {
+        const epRegex = new RegExp(`E?0?${episode}\\b|ep?\\s*0?${episode}\\b`, 'i');
+        if (linkText && !epRegex.test(linkText) && !magnetUrl.includes(`E0${episode}`) && !magnetUrl.includes(`E${episode}`)) {
+          return;
+        }
+      }
+
+      streams.push({
+        title: `NetCine - ${linkText || 'Opção ' + (index + 1)}`,
+        url: magnetUrl
+      });
+    });
+
+  } catch (err) {
+    console.error(`[NetCine] Erro ao extrair magnets:`, err.message);
+  }
+  return streams;
+}
+
+// 3. Handler principal de busca do Stremio
 builder.defineStreamHandler(async ({ type, id }) => {
   console.log(`[NetCine] Solicitação de stream para ${type} ID: ${id}`);
   
@@ -75,22 +141,19 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
   console.log(`[NetCine] Título traduzido: "${meta.title}" | Original: "${meta.originalTitle}"`);
 
-  // Tentativa 1: Título PT-BR + Temporada
+  // Fallbacks de pesquisa
   let searchQuery = season ? `${meta.title} ${season} temporada` : meta.title;
   let postUrl = await searchPostUrl(searchQuery);
 
-  // Tentativa 2: Só o Título PT-BR
   if (!postUrl && season) {
     postUrl = await searchPostUrl(meta.title);
   }
 
-  // Tentativa 3: Título Original + Temporada
   if (!postUrl && meta.originalTitle && meta.originalTitle !== meta.title) {
     searchQuery = season ? `${meta.originalTitle} ${season} temporada` : meta.originalTitle;
     postUrl = await searchPostUrl(searchQuery);
   }
 
-  // Tentativa 4: Só o Título Original
   if (!postUrl && meta.originalTitle && meta.originalTitle !== meta.title) {
     postUrl = await searchPostUrl(meta.originalTitle);
   }
@@ -104,3 +167,17 @@ builder.defineStreamHandler(async ({ type, id }) => {
   const streams = await extractMagnets(postUrl, meta.title, season, episode);
   return { streams };
 });
+
+// Tratamento global de exceções para evitar que o servidor caia (SIGTERM/Crash)
+process.on('uncaughtException', (err) => {
+  console.error('[NetCine Erro Não Tratado]:', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[NetCine Rejeição Não Tratada]:', reason);
+});
+
+// 4. Inicializa o servidor HTTP na porta dinâmica do Railway
+const PORT = process.env.PORT || 8080;
+serveHTTP(builder.getInterface(), { port: PORT });
+console.log(`[NetCine Addon] Servidor rodando na porta ${PORT}`);
