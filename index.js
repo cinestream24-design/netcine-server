@@ -239,6 +239,63 @@ function buildTitle(info, dn) {
   ].filter(Boolean).join('\n');
 }
 
+// ---------- Magnet: valida e reconstrói o link ----------
+
+// Hash em base32 (32 caracteres) -> hexadecimal (40 caracteres)
+function base32ToHex(b32) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = '';
+  for (const c of b32.toUpperCase()) {
+    const v = alphabet.indexOf(c);
+    if (v < 0) return '';
+    bits += v.toString(2).padStart(5, '0');
+  }
+  let hex = '';
+  for (let i = 0; i + 4 <= bits.length; i += 4) {
+    hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
+  }
+  return hex;
+}
+
+// Devolve um magnet limpo, com hash de 40 ou 64 caracteres hexadecimais, ou null se o hash for inválido
+function normalizeMagnet(raw) {
+  const href = (raw || '').trim();
+  const m = href.match(/xt=urn:btih:([A-Za-z0-9]+)/i);
+  if (!m) {
+    console.log(`[NetCine] Magnet sem hash ignorado: ${href.slice(0, 120)}`);
+    return null;
+  }
+
+  let hash = m[1];
+  if (/^[A-Za-z2-7]{32}$/.test(hash)) hash = base32ToHex(hash);
+
+  if (!/^([a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/.test(hash)) {
+    console.log(`[NetCine] Magnet ignorado (hash inválido, ${m[1].length} caracteres): ${href.slice(0, 160)}`);
+    return null;
+  }
+  hash = hash.toLowerCase();
+
+  let dn = '';
+  const trackers = [];
+  const query = href.slice(href.indexOf('?') + 1);
+  for (const part of query.split('&')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const key = part.slice(0, eq).toLowerCase();
+    const value = clean(safeDecode(part.slice(eq + 1)));
+    if (!value) continue;
+    if (key === 'dn') dn = value;
+    if (key === 'tr') {
+      const t = value.replace(/\/anunciar$/i, '/announce');
+      if (!trackers.includes(t)) trackers.push(t);
+    }
+  }
+
+  return `magnet:?xt=urn:btih:${hash}`
+    + (dn ? `&dn=${encodeURIComponent(dn)}` : '')
+    + trackers.map((t) => `&tr=${encodeURIComponent(t)}`).join('');
+}
+
 async function extractMagnets(postUrl) {
   const items = [];
   const seenHashes = new Set();
@@ -256,8 +313,9 @@ async function extractMagnets(postUrl) {
 
     $('a[href^="magnet:"]').each((_, elem) => {
       const $a = $(elem);
-      // O site deixa espaços (%20) sobrando no fim do nome e dos trackers; limpa antes de usar
-      const magnetUrl = $a.attr('href').replace(/(%20|\s)+(?=&|$)/g, '');
+      // Reconstrói o magnet limpo (o site deixa espaços sobrando e alguns hashes vêm fora do padrão)
+      const magnetUrl = normalizeMagnet($a.attr('href'));
+      if (!magnetUrl) return;
 
       const hash = ((magnetUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/) || [])[1] || magnetUrl).toLowerCase();
       if (seenHashes.has(hash)) return;
