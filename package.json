@@ -1,17 +1,17 @@
 {
-  "name": "netcine-server",
+  "name": "netcine-stremio-addon",
   "version": "1.0.0",
-  "description": "Stremio Addon Server for NetCine / NetStream",
+  "description": "Stremio Addon para NetCine / Starck Filmes",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "axios": "^1.6.8",
     "cheerio": "^1.0.0-rc.12",
-    "stremio-addon-sdk": "^1.6.10"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "stremio-addon-sdk": "^1.6.0"
   }
 }
