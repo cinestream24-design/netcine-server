@@ -1,4 +1,4 @@
-const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
+const http = require('http');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const dns = require('dns');
@@ -41,20 +41,6 @@ const HTTP_HEADERS = {
   'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
 };
 
-// 1. Manifest: este addon atende só FILMES
-const manifest = {
-  id: 'org.netcine.addon',
-  version: '1.5.0',
-  name: 'Victor / NetStream',
-  description: 'Links magnet de filmes em Dual Áudio',
-  resources: ['stream'],
-  types: ['movie'],
-  idPrefixes: ['tt'],
-  catalogs: []
-};
-
-// 2. Instância do builder
-const builder = new addonBuilder(manifest);
 
 // ---------- Utilidades ----------
 
@@ -222,7 +208,7 @@ function buildTitle(info, dn, siteName) {
   ].filter(Boolean).join('\n');
 }
 
-function makeItem(rawMagnet, context, postAudio, siteName) {
+function makeItem(rawMagnet, context, postAudio, siteName, requireDnDual = false) {
   const magnetUrl = normalizeMagnet(rawMagnet);
   if (!magnetUrl) return null;
 
@@ -230,16 +216,23 @@ function makeItem(rawMagnet, context, postAudio, siteName) {
   const dn = clean(safeDecode((magnetUrl.match(/[?&]dn=([^&]+)/) || [])[1] || ''));
   const xl = ((rawMagnet || '').match(/[?&](?:amp;)?xl=(\d+)/) || [])[1];
 
+  // Só Dual Áudio: descarta dublado, legendado e áudio não informado
+  if (requireDnDual) {
+    const a = detectAudio(dn);
+    if (!a || a.rank !== 0) return null;
+  }
+
   const info = parseInfo(dn, context, xl, postAudio);
-  if (info.audio.rank === 2) return null;
+  if (info.audio.rank !== 0) return null;
 
   return {
     hash,
     source: siteName,
+    res: info.res,
     audioRank: info.audio.rank,
     resRank: RES_RANK[info.res] !== undefined ? RES_RANK[info.res] : -1,
     stream: {
-      name: `NetStream${info.res ? ' | ' + info.res : ''}`,
+      name: info.res || '',
       title: buildTitle(info, dn, siteName),
       externalUrl: magnetUrl
     }
@@ -331,7 +324,7 @@ function pickStarckCandidates(posts, titles, year) {
       const audio = detectAudio(`${p.audioType} ${p.title} ${postSlug(p.url)}`);
       return { url: p.url, rank: audio ? audio.rank : 3 };
     })
-    .filter((c) => c.rank !== 2)
+    .filter((c) => c.rank === 0 || c.rank === 3)
     .sort((a, b) => a.rank - b.rank)
     .map((c) => c.url);
 }
@@ -345,7 +338,7 @@ async function extractStarckMagnets(postUrl) {
     const $ = cheerio.load(html);
 
     const postAudio = detectAudio(clean($('h1').first().text()));
-    if (postAudio && postAudio.rank === 2) {
+    if (postAudio && postAudio.rank !== 0) {
       return [];
     }
 
@@ -413,7 +406,7 @@ function pickStarckNetCandidates(posts, titles, year) {
       const audio = detectAudio(p.meta);
       return { url: p.url, rank: audio ? audio.rank : 3 };
     })
-    .filter((c) => c.rank !== 2)
+    .filter((c) => c.rank === 0 || c.rank === 3)
     .sort((a, b) => a.rank - b.rank)
     .map((c) => c.url);
 }
@@ -557,7 +550,7 @@ function pickComandoCandidates(posts, titles, year) {
       const audio = detectAudio(`${p.title} ${p.metaText}`);
       return { url: p.url, rank: audio ? audio.rank : 3 };
     })
-    .filter((c) => c.rank !== 2)
+    .filter((c) => c.rank === 0 || c.rank === 3)
     .sort((a, b) => a.rank - b.rank)
     .map((c) => c.url);
 }
@@ -574,8 +567,8 @@ async function extractComandoMagnets(postUrl, imdbId) {
 
     const $ = cheerio.load(html);
     const postAudio = detectAudio(clean($('h1').text() + ' ' + $('title').text()));
-    if (postAudio && postAudio.rank === 2) {
-      console.log(`[Comando] Post legendado ignorado: ${postUrl}`);
+    if (postAudio && postAudio.rank !== 0) {
+      console.log(`[Comando] Post sem dual áudio ignorado: ${postUrl}`);
       return [];
     }
 
@@ -586,7 +579,7 @@ async function extractComandoMagnets(postUrl, imdbId) {
       const $a = $(elem);
       const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
 
-      const item = makeItem($a.attr('href'), context, postAudio, COMANDO_NAME);
+      const item = makeItem($a.attr('href'), context, postAudio, COMANDO_NAME, true);
       if (!item || seen.has(item.hash)) return;
       seen.add(item.hash);
       items.push(item);
@@ -721,47 +714,80 @@ async function getSeeders(hash, magnetUrl) {
 // SCRAPE_END
 
 // =====================================================================
-// Handler principal do Stremio / Nuvio
+// Fontes: cada uma vira um addon separado, com o nome da própria fonte
 // =====================================================================
 
-builder.defineStreamHandler(async ({ type, id }) => {
-  console.log(`[NetCine] Solicitação de stream para ${type} ID: ${id}`);
+const SOURCES = [
+  { key: 'starck', name: STARCK_NAME, fetch: (titles, meta) => getFromStarck(titles, meta) },
+  { key: 'starcknet', name: STARCKNET_NAME, fetch: (titles, meta, imdbId) => getFromStarckNet(titles, meta, imdbId) },
+  { key: 'comando', name: COMANDO_NAME, fetch: (titles, meta, imdbId) => getFromComando(titles, meta, imdbId) }
+];
 
-  if (type !== 'movie') {
-    return { streams: [] };
-  }
+function buildManifest(src) {
+  return {
+    id: `org.netcine.${src.key}`,
+    version: '2.0.0',
+    name: src.name,
+    description: `Links magnet de filmes em Dual Áudio (${src.name})`,
+    resources: ['stream'],
+    types: ['movie'],
+    idPrefixes: ['tt'],
+    catalogs: []
+  };
+}
 
-  const imdbId = id;
-  const meta = await getTmdbMovie(imdbId);
+const manifests = {};
+for (const src of SOURCES) manifests[src.key] = buildManifest(src);
+
+// Cache do TMDB (os 3 addons pedem o mesmo filme ao mesmo tempo)
+const metaCache = new Map();
+function getMeta(imdbId) {
+  const c = metaCache.get(imdbId);
+  if (c && Date.now() - c.at < 60 * 60 * 1000) return c.promise;
+  const promise = getTmdbMovie(imdbId);
+  metaCache.set(imdbId, { promise, at: Date.now() });
+  promise.then((m) => { if (!m) metaCache.delete(imdbId); });
+  return promise;
+}
+
+const resultCache = new Map();
+const RESULT_CACHE_TTL = 10 * 60 * 1000;
+
+async function handleStream(src, imdbId) {
+  console.log(`[${src.name}] Solicitação de stream para ${imdbId}`);
+
+  const cacheKey = `${src.key}:${imdbId}`;
+  const cached = resultCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < RESULT_CACHE_TTL) return cached.data;
+
+  const meta = await getMeta(imdbId);
   if (!meta) {
-    console.log(`[NetCine] Filme não encontrado no TMDB para o ID: ${imdbId}`);
+    console.log(`[${src.name}] Filme não encontrado no TMDB para o ID: ${imdbId}`);
     return { streams: [] };
   }
 
   const titles = [meta.title, meta.originalTitle].filter(Boolean);
 
-  const [starckItems, starckNetItems, comandoItems] = await Promise.all([
-    getFromStarck(titles, meta),
-    getFromStarckNet(titles, meta, imdbId),
-    getFromComando(titles, meta, imdbId)
-  ]);
+  let items = [];
+  try {
+    items = await src.fetch(titles, meta, imdbId);
+  } catch (err) {
+    console.error(`[${src.name}] Erro inesperado:`, err.message);
+  }
 
-  const allItems = [...starckItems, ...starckNetItems, ...comandoItems];
-
-  // Remover duplicados por hash mantendo a ordem de adição
-  const uniqueItems = [];
+  // Remover duplicados por hash
+  const unique = [];
   const seenHashes = new Set();
-
-  for (const item of allItems) {
+  for (const item of items) {
     if (!seenHashes.has(item.hash)) {
       seenHashes.add(item.hash);
-      uniqueItems.push(item);
+      unique.push(item);
     }
   }
 
   // Verifica seeds em paralelo e marca no título de cada link
   if (SEED_CHECK) {
-    await Promise.all(uniqueItems.map(async (item) => {
+    await Promise.all(unique.map(async (item) => {
       try {
         item.seeds = await getSeeders(item.hash, item.stream.externalUrl);
       } catch (e) {
@@ -774,33 +800,103 @@ builder.defineStreamHandler(async ({ type, id }) => {
     }));
   }
 
-  let finalItems = uniqueItems;
-  if (SEED_CHECK && HIDE_DEAD) finalItems = uniqueItems.filter((i) => i.seeds !== 0);
+  let finalItems = unique;
+  if (SEED_CHECK && HIDE_DEAD) finalItems = unique.filter((i) => i.seeds !== 0);
 
-  // Ordenar: agrupa por fonte (Starck > StarckNet > Comando); dentro de cada fonte,
-  // links sem seeds por último, depois áudio (Dual > Dublado), resolução e seeds
-  const SOURCE_ORDER = [STARCK_NAME, STARCKNET_NAME, COMANDO_NAME];
-  const sourceRank = (i) => {
-    const idx = SOURCE_ORDER.indexOf(i.source);
-    return idx < 0 ? SOURCE_ORDER.length : idx;
-  };
+  // Ordenar: sem seeds por último, depois resolução (2160p > 1080p > ...) e mais seeds
   const deadFlag = (i) => (i.seeds === 0 ? 1 : 0);
   finalItems.sort((a, b) => {
-    if (sourceRank(a) !== sourceRank(b)) return sourceRank(a) - sourceRank(b);
     if (deadFlag(a) !== deadFlag(b)) return deadFlag(a) - deadFlag(b);
-    if (a.audioRank !== b.audioRank) return a.audioRank - b.audioRank;
     if (a.resRank !== b.resRank) return b.resRank - a.resRank;
     return (b.seeds || 0) - (a.seeds || 0);
   });
 
-  const streams = finalItems.map((item) => item.stream);
-  console.log(`[NetCine] Retornando ${streams.length} streams para ${imdbId}`);
+  // Nome em negrito: Título do filme em PT-BR | qualidade
+  const streams = finalItems.map((item) => {
+    item.stream.name = `${meta.title}${item.res ? ' | ' + item.res : ''}`;
+    return item.stream;
+  });
 
-  return { streams };
+  console.log(`[${src.name}] Retornando ${streams.length} streams para ${imdbId}`);
+
+  const data = { streams };
+  if (streams.length > 0) resultCache.set(cacheKey, { data, at: Date.now() });
+  return data;
+}
+
+// =====================================================================
+// Servidor HTTP (protocolo de addon do Stremio / Nuvio)
+// =====================================================================
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS'
+};
+
+function sendJson(res, status, obj) {
+  res.writeHead(status, { ...CORS_HEADERS, 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(obj));
+}
+
+function esc(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function landingPage(req) {
+  const host = req.headers.host || 'localhost';
+  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0];
+  const rows = SOURCES.map((s) => (
+    `<p><b>${esc(s.name)}</b><br>`
+    + `<a href="stremio://${esc(host)}/${s.key}/manifest.json">Instalar</a> · `
+    + `<code>${esc(proto)}://${esc(host)}/${s.key}/manifest.json</code></p>`
+  )).join('');
+  return '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>Victor / NetStream</title>'
+    + '<body style="font-family:sans-serif;max-width:640px;margin:24px auto;padding:0 16px;word-break:break-all">'
+    + '<h2>Victor / NetStream</h2><p>Instale cada fonte como um addon separado:</p>'
+    + rows + '</body>';
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS_HEADERS);
+      return res.end();
+    }
+
+    const { pathname } = new URL(req.url, 'http://localhost');
+
+    if (pathname === '/') {
+      res.writeHead(200, { ...CORS_HEADERS, 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(landingPage(req));
+    }
+
+    const m = pathname.match(/^\/([a-z0-9]+)(\/.*)?$/);
+    const src = m && SOURCES.find((s) => s.key === m[1]);
+    if (!src) return sendJson(res, 404, { error: 'Not found' });
+
+    const rest = m[2] || '/';
+
+    if (rest === '/manifest.json') return sendJson(res, 200, manifests[src.key]);
+
+    const sm = rest.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
+    if (sm) {
+      const type = decodeURIComponent(sm[1]);
+      const id = decodeURIComponent(sm[2]);
+      if (type !== 'movie') return sendJson(res, 200, { streams: [] });
+      return sendJson(res, 200, await handleStream(src, id));
+    }
+
+    return sendJson(res, 404, { error: 'Not found' });
+  } catch (err) {
+    console.error('[NetCine] Erro na requisição:', err.message);
+    return sendJson(res, 500, { streams: [] });
+  }
 });
 
 const PORT = process.env.PORT || 7000;
 
-serveHTTP(builder.getInterface(), { port: PORT }).then(() => {
-  console.log(`[NetCine] Addon a rodar na porta ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`[NetCine] Addons rodando na porta ${PORT}: ${SOURCES.map((s) => '/' + s.key).join(', ')}`);
 });
