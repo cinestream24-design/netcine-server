@@ -33,14 +33,14 @@ async function getTmdbMeta(type, imdbId) {
     const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${tmdbApiKey}&external_source=imdb_id&language=pt-BR`;
     const res = await axios.get(findUrl, { timeout: 5000 });
     
-    if (type === 'movie' && res.data.movie_results?.length > 0) {
+    if (type === 'movie' && res.data.movie_results && res.data.movie_results.length > 0) {
       const movie = res.data.movie_results[0];
       return {
         title: movie.title,
         originalTitle: movie.original_title,
         year: movie.release_date ? movie.release_date.split('-')[0] : ''
       };
-    } else if (type === 'series' && res.data.tv_results?.length > 0) {
+    } else if (type === 'series' && res.data.tv_results && res.data.tv_results.length > 0) {
       const tv = res.data.tv_results[0];
       return {
         title: tv.name,
@@ -97,7 +97,6 @@ function parseMagnetLink(rawUrl) {
   if (!rawUrl) return null;
   if (rawUrl.startsWith('magnet:?')) return rawUrl;
   
-  // Decodifica magnet oculto em parâmetros de protetores de link
   if (rawUrl.includes('magnet%3A%3F') || rawUrl.includes('magnet:?')) {
     const match = rawUrl.match(/(magnet:\?[^&"'<]+)/i) || rawUrl.match(/(magnet%3A%3F[^&"'<]+)/i);
     if (match) return decodeURIComponent(match[1]);
@@ -119,14 +118,24 @@ async function extractMagnets(postUrl, title, season, episode) {
     const streams = [];
 
     $('a').each((i, elem) => {
-      const rawHref = $(elem).attr('href') || $(elem).attr('data-magnet') \vert{}\vert{}$(elem).attr('data-link');
+      // Método seguro: itera sobre uma lista de atributos sem usar ||
+      const attributes = ['href', 'data-magnet', 'data-link'];
+      let rawHref = null;
+
+      for (let j = 0; j < attributes.length; j++) {
+        const val = $(elem).attr(attributes[j]);
+        if (val) {
+          rawHref = val;
+          break;
+        }
+      }
+
       const magnet = parseMagnetLink(rawHref);
 
       if (magnet) {
         const parentText = $(elem).parent().text() || '';
         const context = `${$(elem).text()} ${parentText}`.toLowerCase();
 
-        // Filtro de Episódio para Séries
         if (episode) {
           const epFormatted = episode.toString().padStart(2, '0');
           const epRegex = new RegExp(`(e${epFormatted}|ep${epFormatted}|episodio\\s*${episode}|ep\\s*${episode})`, 'i');
@@ -136,19 +145,25 @@ async function extractMagnets(postUrl, title, season, episode) {
         }
 
         let quality = '720p';
-        if (context.includes('4k') || context.includes('2160p')) quality = '4K';
-        else if (context.includes('1080p') || context.includes('full hd')) quality = '1080p';
+        if (context.includes('4k') || context.includes('2160p')) {
+          quality = '4K';
+        } else if (context.includes('1080p') || context.includes('full hd')) {
+          quality = '1080p';
+        }
 
         let audio = 'Dublado';
-        if (context.includes('dual') || context.includes('dual audio')) audio = 'Dual Áudio';
-        else if (context.includes('legendado')) audio = 'Legendado';
+        if (context.includes('dual') || context.includes('dual audio')) {
+          audio = 'Dual Áudio';
+        } else if (context.includes('legendado')) {
+          audio = 'Legendado';
+        }
 
         const infoHash = extractInfoHash(magnet);
 
         streams.push({
           name: 'NetCine / Starck',
           title: `${title}${episode ? ` (S${season}E${episode})` : ''}\nQualidade: ${quality} | Áudio: ${audio}`,
-          infoHash: infoHash || undefined,
+          infoHash: infoHash ? infoHash : undefined,
           url: magnet
         });
       }
@@ -166,8 +181,8 @@ builder.defineStreamHandler(async ({ type, id }) => {
   
   const parts = id.split(':');
   const imdbId = parts[0];
-  const season = parts[1] || null;
-  const episode = parts[2] || null;
+  const season = parts[1] ? parts[1] : null;
+  const episode = parts[2] ? parts[2] : null;
 
   const meta = await getTmdbMeta(type, imdbId);
   if (!meta) {
