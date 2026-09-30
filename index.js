@@ -16,9 +16,9 @@ const HTTP_HEADERS = {
 // 1. Manifest: este addon atende só FILMES (as séries do site vêm em pacote completo)
 const manifest = {
   id: 'org.netcine.addon',
-  version: '1.1.0',
+  version: '1.2.0',
   name: 'NetCine Addon',
-  description: 'Links magnet de filmes em português',
+  description: 'Links magnet de filmes em Dual Áudio',
   resources: ['stream'],
   types: ['movie'],
   idPrefixes: ['tt'],
@@ -45,7 +45,7 @@ function slugify(str) {
 
 function postSlug(url) {
   const m = (url || '').match(/\/catalog\/([^/?#]+)/);
-  return m ? m[1] : '';
+  return m ? safeDecode(m[1]) : '';
 }
 
 function safeDecode(str) {
@@ -54,6 +54,19 @@ function safeDecode(str) {
   } catch (e) {
     return str || '';
   }
+}
+
+function clean(str) {
+  return (str || '').replace(/\s+/g, ' ').trim();
+}
+
+// Áudio: dual (0) > dublado (1). Legendado (2) é descartado. Desconhecido = null
+function detectAudio(text) {
+  const t = normalizeText(text);
+  if (/dual/.test(t)) return { rank: 0, label: '🔊 Dual Áudio' };
+  if (/dublad|dublagem|nacional/.test(t)) return { rank: 1, label: '🔊 Dublado' };
+  if (/legendad|subtitulad|\bleg\b/.test(t)) return { rank: 2, label: '💬 Legendado' };
+  return null;
 }
 
 // ---------- TMDB: converte o ID do IMDb no título ----------
@@ -65,7 +78,11 @@ async function getTmdbMovie(imdbId) {
 
     if (res.data.movie_results && res.data.movie_results.length > 0) {
       const movie = res.data.movie_results[0];
-      return { title: movie.title, originalTitle: movie.original_title };
+      return {
+        title: movie.title,
+        originalTitle: movie.original_title,
+        year: (movie.release_date || '').slice(0, 4)
+      };
     }
   } catch (err) {
     console.error(`[NetCine] Erro TMDB (${imdbId}):`, err.message);
@@ -86,8 +103,7 @@ async function searchPosts(queryTitle) {
     const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS });
     const $ = cheerio.load(html);
 
-    const seen = new Set();
-    const posts = [];
+    const byUrl = new Map();
 
     // Os posts do site ficam todos em /catalog/<slug>/
     $('a[href*="/catalog/"]').each((_, elem) => {
@@ -95,13 +111,28 @@ async function searchPosts(queryTitle) {
       if (!href) return;
       if (href.startsWith('/')) href = BASE_URL + href;
       if (!href.startsWith(BASE_URL)) return;
-      if (seen.has(href)) return;
-      seen.add(href);
 
-      const title = ($(elem).attr('title') || $(elem).text() || '').trim();
-      posts.push({ url: href, title });
+      // Cada item da lista mostra o tipo de áudio (Dual Áudio, Dublado, Legendado)
+      const $item = $(elem).closest('.item, .sub-item, article, li');
+      let audioType = clean($item.find('.footer-audio-type').first().text());
+      if (!audioType) {
+        // Se o selo tiver outra classe: usa o texto do card, desde que ele seja de um post só
+        const hrefs = new Set();
+        $item.find('a[href*="/catalog/"]').each((__, a) => hrefs.add($(a).attr('href')));
+        if (hrefs.size === 1) audioType = clean($item.text());
+      }
+      const title = clean($(elem).attr('title') || $(elem).text());
+
+      const prev = byUrl.get(href);
+      if (!prev) {
+        byUrl.set(href, { url: href, title, audioType });
+      } else {
+        if (!prev.audioType && audioType) prev.audioType = audioType;
+        if (!prev.title && title) prev.title = title;
+      }
     });
 
+    const posts = [...byUrl.values()];
     console.log(`[NetCine] ${posts.length} posts encontrados para "${term}"`);
     if (posts.length === 0) {
       console.log(`[NetCine] HTML recebido (${html.length} chars): ${html.slice(0, 300).replace(/\s+/g, ' ')}`);
@@ -113,29 +144,43 @@ async function searchPosts(queryTitle) {
   }
 }
 
-// Escolhe o post do filme (mesmo título, ignorando posts de temporada de série)
-function pickMovie(posts, titles) {
+// O que pode vir depois do título no slug: ano e/ou data (dd-mm-aaaa) e, às vezes, o tipo de áudio
+const SLUG_SUFFIX = /^(-\d{4})?(-\d{2}-\d{2}-\d{4})?(-(dual-audio|dublado|legendado|nacional))?$/;
+
+// Lista os posts do filme, sem legendado, com Dual Áudio primeiro
+function pickMovieCandidates(posts, titles, year) {
   const titleSlugs = titles.map(slugify).filter(Boolean);
 
-  const found = posts.find((p) => {
-    const s = postSlug(p.url);
-    if (/temporada/.test(s)) return false;
-    return titleSlugs.some((t) => s === t || s.startsWith(t + '-'));
-  });
+  const isSameMovie = (slug, strict) =>
+    titleSlugs.some((t) => {
+      if (slug === t) return true;
+      if (!slug.startsWith(t + '-')) return false;
+      if (strict) return SLUG_SUFFIX.test(slug.slice(t.length));
+      return !!year && new RegExp(`-${year}(-|$)`).test(slug);
+    });
 
-  if (!found && posts.length > 0) {
+  const movies = posts.filter((p) => !/temporada/.test(postSlug(p.url)));
+
+  let matches = movies.filter((p) => isSameMovie(postSlug(p.url), true));
+  if (matches.length === 0) matches = movies.filter((p) => isSameMovie(postSlug(p.url), false));
+
+  if (matches.length === 0 && posts.length > 0) {
     console.log(`[NetCine] Nenhum slug bateu com ${JSON.stringify(titleSlugs)}. Primeiros resultados: ${posts.slice(0, 5).map((p) => postSlug(p.url)).join(' | ')}`);
   }
-  return found ? found.url : null;
+
+  return matches
+    .map((p) => {
+      const audio = detectAudio(`${p.audioType} ${p.title} ${postSlug(p.url)}`);
+      return { url: p.url, rank: audio ? audio.rank : 3 }; // 3 = ainda não sabemos (confere na página)
+    })
+    .filter((c) => c.rank !== 2) // nada de legendado
+    .sort((a, b) => a.rank - b.rank)
+    .map((c) => c.url);
 }
 
 // ---------- Extração dos magnets ----------
 
 const RES_RANK = { '2160p': 4, '1440p': 3, '1080p': 2, '720p': 1, '480p': 0 };
-
-function clean(str) {
-  return (str || '').replace(/\s+/g, ' ').trim();
-}
 
 function formatBytes(bytes) {
   const n = Number(bytes);
@@ -143,15 +188,6 @@ function formatBytes(bytes) {
   const gb = n / (1024 ** 3);
   if (gb >= 1) return `${gb.toFixed(2)} GB`;
   return `${Math.round(n / (1024 ** 2))} MB`;
-}
-
-// Detecta o áudio: dual > dublado > legendado
-function detectAudio(text) {
-  const t = normalizeText(text);
-  if (/dual/.test(t)) return { rank: 0, label: '🔊 Dual Áudio' };
-  if (/dublad|dublagem|nacional/.test(t)) return { rank: 1, label: '🔊 Dublado' };
-  if (/legendad|subtitulad|\bleg\b/.test(t)) return { rank: 2, label: '💬 Legendado' };
-  return null;
 }
 
 function nearestHeading($, $a) {
@@ -164,11 +200,11 @@ function nearestHeading($, $a) {
   return '';
 }
 
-function parseInfo(dn, context, xl) {
+function parseInfo(dn, context, xl, postAudio) {
   const all = `${dn} ${context}`;
 
-  // O nome do arquivo (dn) manda; se não disser o áudio, usa o texto ao redor
-  const audio = detectAudio(dn) || detectAudio(context) || { rank: 3, label: '🔊 Áudio não informado' };
+  // Nome do arquivo manda; depois o texto ao redor do link; por fim o áudio do post
+  const audio = detectAudio(dn) || detectAudio(context) || postAudio || { rank: 3, label: '🔊 Áudio não informado' };
 
   let res = (all.match(/\b(2160p|4k|1440p|1080p|720p|480p)\b/i) || [])[1] || '';
   res = res.toLowerCase() === '4k' ? '2160p' : res.toLowerCase();
@@ -211,9 +247,17 @@ async function extractMagnets(postUrl) {
     const { data: html } = await axios.get(postUrl, { timeout: 10000, headers: HTTP_HEADERS });
     const $ = cheerio.load(html);
 
+    // O título da página diz o áudio: "... Dual Áudio Download" ou "... Legendado Download"
+    const postAudio = detectAudio(clean($('h1').first().text()));
+    if (postAudio && postAudio.rank === 2) {
+      console.log(`[NetCine] Post legendado ignorado: ${postUrl}`);
+      return [];
+    }
+
     $('a[href^="magnet:"]').each((_, elem) => {
       const $a = $(elem);
-      const magnetUrl = $a.attr('href');
+      // O site deixa espaços (%20) sobrando no fim do nome e dos trackers; limpa antes de usar
+      const magnetUrl = $a.attr('href').replace(/(%20|\s)+(?=&|$)/g, '');
 
       const hash = ((magnetUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/) || [])[1] || magnetUrl).toLowerCase();
       if (seenHashes.has(hash)) return;
@@ -223,7 +267,8 @@ async function extractMagnets(postUrl) {
       const xl = (magnetUrl.match(/[?&]xl=(\d+)/) || [])[1];
       const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
 
-      const info = parseInfo(dn, context, xl);
+      const info = parseInfo(dn, context, xl, postAudio);
+      if (info.audio.rank === 2) return; // nada de legendado
 
       items.push({
         audioRank: info.audio.rank,
@@ -239,7 +284,7 @@ async function extractMagnets(postUrl) {
     console.error(`[NetCine] Erro ao extrair magnets:`, err.message);
   }
 
-  // Dual Áudio primeiro, depois Dublado, Legendado; dentro de cada grupo, maior resolução primeiro
+  // Dual Áudio primeiro, depois Dublado; dentro de cada grupo, maior resolução primeiro
   items.sort((a, b) => a.audioRank - b.audioRank || b.resRank - a.resRank);
   return items.map((i) => i.stream);
 }
@@ -261,28 +306,36 @@ builder.defineStreamHandler(async ({ type, id }) => {
     return { streams: [] };
   }
 
-  console.log(`[NetCine] Título traduzido: "${meta.title}" | Original: "${meta.originalTitle}"`);
+  console.log(`[NetCine] Título traduzido: "${meta.title}" | Original: "${meta.originalTitle}" | Ano: ${meta.year}`);
 
   const titles = [meta.title];
   if (meta.originalTitle && meta.originalTitle !== meta.title) titles.push(meta.originalTitle);
 
   // Busca pelo título normal (o ID do IMDb nunca vai para o site)
-  let postUrl = null;
+  let candidates = [];
   for (const t of titles) {
     const posts = await searchPosts(t);
-    postUrl = pickMovie(posts, titles);
-    if (postUrl) break;
+    candidates = pickMovieCandidates(posts, titles, meta.year);
+    if (candidates.length > 0) break;
   }
 
-  if (!postUrl) {
-    console.log(`[NetCine] Nenhum post encontrado para: ${meta.title}`);
+  if (candidates.length === 0) {
+    console.log(`[NetCine] Nenhum post (sem legendado) encontrado para: ${meta.title}`);
     return { streams: [] };
   }
 
-  console.log(`[NetCine] Post encontrado: ${postUrl}`);
-  const streams = await extractMagnets(postUrl);
-  console.log(`[NetCine] ${streams.length} link(s) magnet retornados`);
-  return { streams };
+  // Tenta os posts em ordem (Dual Áudio primeiro) e usa o primeiro que tiver links
+  for (const postUrl of candidates.slice(0, 3)) {
+    console.log(`[NetCine] Testando post: ${postUrl}`);
+    const streams = await extractMagnets(postUrl);
+    if (streams.length > 0) {
+      console.log(`[NetCine] ${streams.length} link(s) magnet retornados`);
+      return { streams };
+    }
+  }
+
+  console.log(`[NetCine] Nenhum link Dual Áudio/Dublado para: ${meta.title}`);
+  return { streams: [] };
 });
 
 // Tratamento global de exceções para evitar crashes
