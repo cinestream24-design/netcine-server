@@ -723,10 +723,20 @@ const SOURCES = [
   { key: 'comando', name: COMANDO_NAME, fetch: (titles, meta, imdbId) => getFromComando(titles, meta, imdbId) }
 ];
 
+// Addon único: junta as 3 fontes (manifest na raiz)
+const ALL_SOURCE = {
+  key: 'all',
+  name: 'Victor / NetStream',
+  fetch: async (titles, meta, imdbId) => {
+    const lists = await Promise.all(SOURCES.map((s) => s.fetch(titles, meta, imdbId).catch(() => [])));
+    return lists.flat();
+  }
+};
+
 function buildManifest(src) {
   return {
-    id: `org.netcine.${src.key}`,
-    version: '2.0.0',
+    id: src.key === 'all' ? 'org.netcine.addon' : `org.netcine.${src.key}`,
+    version: '2.1.0',
     name: src.name,
     description: `Links magnet de filmes em Dual Áudio (${src.name})`,
     resources: ['stream'],
@@ -737,7 +747,7 @@ function buildManifest(src) {
 }
 
 const manifests = {};
-for (const src of SOURCES) manifests[src.key] = buildManifest(src);
+for (const src of [...SOURCES, ALL_SOURCE]) manifests[src.key] = buildManifest(src);
 
 // Cache do TMDB (os 3 addons pedem o mesmo filme ao mesmo tempo)
 const metaCache = new Map();
@@ -803,9 +813,16 @@ async function handleStream(src, imdbId) {
   let finalItems = unique;
   if (SEED_CHECK && HIDE_DEAD) finalItems = unique.filter((i) => i.seeds !== 0);
 
-  // Ordenar: sem seeds por último, depois resolução (2160p > 1080p > ...) e mais seeds
+  // Ordenar: agrupa por fonte (Starck > StarckNet > Comando); dentro de cada fonte,
+  // sem seeds por último, depois resolução (2160p > 1080p > ...) e mais seeds
+  const SOURCE_ORDER = SOURCES.map((x) => x.name);
+  const sourceRank = (i) => {
+    const idx = SOURCE_ORDER.indexOf(i.source);
+    return idx < 0 ? SOURCE_ORDER.length : idx;
+  };
   const deadFlag = (i) => (i.seeds === 0 ? 1 : 0);
   finalItems.sort((a, b) => {
+    if (sourceRank(a) !== sourceRank(b)) return sourceRank(a) - sourceRank(b);
     if (deadFlag(a) !== deadFlag(b)) return deadFlag(a) - deadFlag(b);
     if (a.resRank !== b.resRank) return b.resRank - a.resRank;
     return (b.seeds || 0) - (a.seeds || 0);
@@ -846,16 +863,14 @@ function esc(str) {
 function landingPage(req) {
   const host = req.headers.host || 'localhost';
   const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0];
-  const rows = SOURCES.map((s) => (
-    `<p><b>${esc(s.name)}</b><br>`
-    + `<a href="stremio://${esc(host)}/${s.key}/manifest.json">Instalar</a> · `
-    + `<code>${esc(proto)}://${esc(host)}/${s.key}/manifest.json</code></p>`
-  )).join('');
+  const url = `${proto}://${host}/manifest.json`;
   return '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
     + '<title>Victor / NetStream</title>'
     + '<body style="font-family:sans-serif;max-width:640px;margin:24px auto;padding:0 16px;word-break:break-all">'
-    + '<h2>Victor / NetStream</h2><p>Instale cada fonte como um addon separado:</p>'
-    + rows + '</body>';
+    + '<h2>Victor / NetStream</h2><p>Link do addon:</p>'
+    + `<p><code>${esc(url)}</code></p>`
+    + `<p><a href="stremio://${esc(host)}/manifest.json">Instalar</a></p>`
+    + '</body>';
 }
 
 const server = http.createServer(async (req, res) => {
@@ -872,11 +887,17 @@ const server = http.createServer(async (req, res) => {
       return res.end(landingPage(req));
     }
 
-    const m = pathname.match(/^\/([a-z0-9]+)(\/.*)?$/);
-    const src = m && SOURCES.find((s) => s.key === m[1]);
-    if (!src) return sendJson(res, 404, { error: 'Not found' });
-
-    const rest = m[2] || '/';
+    let src;
+    let rest;
+    if (pathname === '/manifest.json' || pathname.startsWith('/stream/')) {
+      src = ALL_SOURCE;
+      rest = pathname;
+    } else {
+      const m = pathname.match(/^\/([a-z0-9]+)(\/.*)?$/);
+      src = m && SOURCES.find((s) => s.key === m[1]);
+      if (!src) return sendJson(res, 404, { error: 'Not found' });
+      rest = m[2] || '/';
+    }
 
     if (rest === '/manifest.json') return sendJson(res, 200, manifests[src.key]);
 
