@@ -62,7 +62,7 @@ async function getTmdbMeta(type, imdbId) {
 // Pesquisa no site pelo post do filme/série
 async function searchPostUrl(queryTitle) {
   try {
-    const searchTerm = normalizeText(queryTitle);
+    const searchTerm = (queryTitle || '').trim();
     const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(searchTerm)}`;
 
     console.log(`[NetCine] Pesquisando no site: ${searchUrl}`);
@@ -101,21 +101,35 @@ async function extractMagnets(postUrl, title, season, episode) {
 
     const $ = cheerio.load(html);
 
+    const all = [];
+
     $('a[href^="magnet:"]').each((index, elem) => {
       const magnetUrl = $(elem).attr('href');
       const linkText = $(elem).text().trim() || $(elem).parent().text().trim();
+      all.push({ magnetUrl, linkText, index });
+    });
 
-      // Filtro para episódios se for série
-      if (season && episode) {
-        const epRegex = new RegExp(`E?0?${episode}\\b|ep?\\s*0?${episode}\\b`, 'i');
-        if (linkText && !epRegex.test(linkText) && !magnetUrl.includes(`E0${episode}`) && !magnetUrl.includes(`E${episode}`)) {
-          return;
-        }
-      }
+    let selected = all;
 
+    // Se for série, tenta filtrar pelo episódio; se não achar nada, mostra todos
+    if (season && episode) {
+      const ep = parseInt(episode, 10);
+      const epRegex = new RegExp(`(^|[^0-9])(E|EP|EPIS[OÓ]DIO)?\\s*0?${ep}([^0-9]|$)`, 'i');
+      const filtered = all.filter(({ magnetUrl, linkText }) => {
+        let dn = '';
+        try {
+          dn = decodeURIComponent((magnetUrl.match(/dn=([^&]+)/) || [])[1] || '');
+        } catch (e) {}
+        return epRegex.test(linkText) || epRegex.test(dn);
+      });
+      if (filtered.length > 0) selected = filtered;
+    }
+
+    selected.forEach(({ magnetUrl, linkText, index }) => {
       streams.push({
-        title: `NetCine - ${linkText || 'Opção ' + (index + 1)}`,
-        url: magnetUrl
+        name: 'NetCine',
+        title: linkText || `Opção ${index + 1}`,
+        externalUrl: magnetUrl
       });
     });
 
@@ -142,18 +156,8 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
   console.log(`[NetCine] Título traduzido: "${meta.title}" | Original: "${meta.originalTitle}"`);
 
-  // Fallbacks de pesquisa
-  let searchQuery = season ? `${meta.title} ${season} temporada` : meta.title;
-  let postUrl = await searchPostUrl(searchQuery);
-
-  if (!postUrl && season) {
-    postUrl = await searchPostUrl(meta.title);
-  }
-
-  if (!postUrl && meta.originalTitle && meta.originalTitle !== meta.title) {
-    searchQuery = season ? `${meta.originalTitle} ${season} temporada` : meta.originalTitle;
-    postUrl = await searchPostUrl(searchQuery);
-  }
+  // Pesquisa no site pelo título normal (o ID só serve para descobrir o título no TMDB)
+  let postUrl = await searchPostUrl(meta.title);
 
   if (!postUrl && meta.originalTitle && meta.originalTitle !== meta.title) {
     postUrl = await searchPostUrl(meta.originalTitle);
