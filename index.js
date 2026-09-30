@@ -131,35 +131,117 @@ function pickMovie(posts, titles) {
 
 // ---------- Extração dos magnets ----------
 
+const RES_RANK = { '2160p': 4, '1440p': 3, '1080p': 2, '720p': 1, '480p': 0 };
+
+function clean(str) {
+  return (str || '').replace(/\s+/g, ' ').trim();
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes);
+  if (!n || n < 0) return '';
+  const gb = n / (1024 ** 3);
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  return `${Math.round(n / (1024 ** 2))} MB`;
+}
+
+// Detecta o áudio: dual > dublado > legendado
+function detectAudio(text) {
+  const t = normalizeText(text);
+  if (/dual/.test(t)) return { rank: 0, label: '🔊 Dual Áudio' };
+  if (/dublad|dublagem|nacional/.test(t)) return { rank: 1, label: '🔊 Dublado' };
+  if (/legendad|subtitulad|\bleg\b/.test(t)) return { rank: 2, label: '💬 Legendado' };
+  return null;
+}
+
+function nearestHeading($, $a) {
+  let $node = $a;
+  for (let i = 0; i < 4 && $node.length; i++) {
+    const h = clean($node.prevAll('h2,h3,h4').first().text());
+    if (h) return h;
+    $node = $node.parent();
+  }
+  return '';
+}
+
+function parseInfo(dn, context, xl) {
+  const all = `${dn} ${context}`;
+
+  // O nome do arquivo (dn) manda; se não disser o áudio, usa o texto ao redor
+  const audio = detectAudio(dn) || detectAudio(context) || { rank: 3, label: '🔊 Áudio não informado' };
+
+  let res = (all.match(/\b(2160p|4k|1440p|1080p|720p|480p)\b/i) || [])[1] || '';
+  res = res.toLowerCase() === '4k' ? '2160p' : res.toLowerCase();
+
+  let source = (all.match(/\b(WEB[-. ]?DL|WEB[-. ]?Rip|Blu[-. ]?Ray|BDRip|BRRip|REMUX|HDRip|HDTV|DVDRip|HDTS|HDCAM|CAM)\b/i) || [])[1] || '';
+  source = source.toUpperCase().replace(/[. ]/g, '-').replace('WEBDL', 'WEB-DL').replace('WEBRIP', 'WEBRip').replace('BLURAY', 'BluRay');
+
+  let codec = (all.match(/\b(x265|HEVC|H\.?265|x264|H\.?264|AV1)\b/i) || [])[1] || '';
+  codec = codec.replace(/^h\.?265$/i, 'H.265').replace(/^h\.?264$/i, 'H.264').replace(/^hevc$/i, 'HEVC');
+
+  const hdr = (all.match(/\b(HDR10\+?|HDR|Dolby[ .]?Vision)\b/i) || [])[1] || '';
+  const channels = (dn.match(/\b(7\.1|5\.1|2\.0)\b/) || [])[1] || '';
+
+  let size = formatBytes(xl);
+  if (!size) {
+    const m = all.match(/(\d+(?:[.,]\d+)?)\s*(GB|MB)/i);
+    if (m) size = `${m[1].replace(',', '.')} ${m[2].toUpperCase()}`;
+  }
+
+  return { audio, res, source, codec, hdr, channels, size };
+}
+
+function buildTitle(info, dn) {
+  const tech = [info.res, info.source, info.codec, info.hdr].filter(Boolean).join(' · ');
+  const extra = [info.size ? `💾 ${info.size}` : '', info.channels ? `🔈 ${info.channels}` : ''].filter(Boolean).join('  ');
+
+  return [
+    info.audio.label,
+    tech ? `🎬 ${tech}` : '',
+    extra,
+    dn ? `📄 ${dn}` : ''
+  ].filter(Boolean).join('\n');
+}
+
 async function extractMagnets(postUrl) {
-  const streams = [];
+  const items = [];
+  const seenHashes = new Set();
+
   try {
     const { data: html } = await axios.get(postUrl, { timeout: 10000, headers: HTTP_HEADERS });
     const $ = cheerio.load(html);
 
-    $('a[href^="magnet:"]').each((index, elem) => {
+    $('a[href^="magnet:"]').each((_, elem) => {
       const $a = $(elem);
       const magnetUrl = $a.attr('href');
-      const $p = $a.closest('p');
 
-      const dn = safeDecode((magnetUrl.match(/[?&]dn=([^&]+)/) || [])[1] || '');
-      let label = ($p.find('strong').first().text() || '').replace(/\s+/g, ' ').replace(/:\s*$/, '').trim();
-      if (!label) label = $a.parent().text().replace(/\s+/g, ' ').trim();
-      const quality = $a.text().replace(/\s+/g, ' ').trim();
-      const version = $p.prevAll('h3').first().text().replace(/\s+/g, ' ').trim();
+      const hash = ((magnetUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/) || [])[1] || magnetUrl).toLowerCase();
+      if (seenHashes.has(hash)) return;
+      seenHashes.add(hash);
 
-      const line1 = [label, quality].filter(Boolean).join(' · ') || `Opção ${index + 1}`;
+      const dn = clean(safeDecode((magnetUrl.match(/[?&]dn=([^&]+)/) || [])[1] || ''));
+      const xl = (magnetUrl.match(/[?&]xl=(\d+)/) || [])[1];
+      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
 
-      streams.push({
-        name: 'NetCine',
-        title: [line1, version, dn].filter(Boolean).join('\n'),
-        externalUrl: magnetUrl
+      const info = parseInfo(dn, context, xl);
+
+      items.push({
+        audioRank: info.audio.rank,
+        resRank: RES_RANK[info.res] !== undefined ? RES_RANK[info.res] : -1,
+        stream: {
+          name: `NetCine${info.res ? ' ' + info.res : ''}`,
+          title: buildTitle(info, dn),
+          externalUrl: magnetUrl
+        }
       });
     });
   } catch (err) {
     console.error(`[NetCine] Erro ao extrair magnets:`, err.message);
   }
-  return streams;
+
+  // Dual Áudio primeiro, depois Dublado, Legendado; dentro de cada grupo, maior resolução primeiro
+  items.sort((a, b) => a.audioRank - b.audioRank || b.resRank - a.resRank);
+  return items.map((i) => i.stream);
 }
 
 // 3. Handler principal do Stremio / Nuvio
