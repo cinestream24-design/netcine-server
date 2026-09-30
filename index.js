@@ -15,7 +15,7 @@ const manifest = {
   idPrefixes: ['tt']
 };
 
-// 2. Criar a instância do builder (AQUI fica definido o "builder")
+// 2. Instância do builder
 const builder = new addonBuilder(manifest);
 
 // Função auxiliar para limpar e normalizar textos de busca
@@ -168,7 +168,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
   return { streams };
 });
 
-// Tratamento global de exceções para evitar que o servidor caia (SIGTERM/Crash)
+// Tratamento global de exceções para evitar crashes
 process.on('uncaughtException', (err) => {
   console.error('[NetCine Erro Não Tratado]:', err.message);
 });
@@ -177,7 +177,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[NetCine Rejeição Não Tratada]:', reason);
 });
 
-// 4. Inicializa o servidor HTTP na porta dinâmica do Railway
+// 4. Inicializa o servidor HTTP na porta dinâmica do ambiente
 const PORT = process.env.PORT || 8080;
 serveHTTP(builder.getInterface(), { port: PORT });
 console.log(`[NetCine Addon] Servidor rodando na porta ${PORT}`);
