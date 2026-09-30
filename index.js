@@ -7,8 +7,11 @@ const STARCK_URL = (process.env.STARCK_URL || 'https://starckfilmes-v24.com').re
 const STARCKNET_URL = (process.env.STARCKNET_URL || 'https://starckfilmesnet.com').replace(/\/+$/, '');
 const COMANDO_URL = (process.env.COMANDO_URL || 'https://comandotorrents.org').replace(/\/+$/, '');
 
-// Defina TMDB_API_KEY nas variáveis de ambiente
-const TMDB_API_KEY = process.env.TMDB_API_KEY || 'd8e8e85d692358d3b5db2cfd08487457';
+// Defina TMDB_API_KEY nas variáveis de ambiente do Railway
+const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
+if (!TMDB_API_KEY) {
+  console.warn('[NetCine] ATENÇÃO: TMDB_API_KEY não definida nas variáveis de ambiente!');
+}
 
 const HTTP_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -220,12 +223,12 @@ function makeItem(rawMagnet, context, postAudio, siteName) {
   };
 }
 
-function nearestHeading($,$a) {
-  let $node =$a;
+function nearestHeading($, $a) {
+  let $node = $a;
   for (let i = 0; i < 4 && $node.length; i++) {
     const h = clean($node.prevAll('h2,h3,h4').first().text());
     if (h) return h;
-    $node =$node.parent();
+    $node = $node.parent();
   }
   return '';
 }
@@ -255,14 +258,14 @@ async function searchStarck(queryTitle) {
       if (href.startsWith('/')) href = STARCK_URL + href;
       if (!href.startsWith(STARCK_URL)) return;
 
-      const $item =$(elem).closest('.item, .sub-item, article, li');
+      const $item = $(elem).closest('.item, .sub-item, article, li');
       let audioType = clean($item.find('.footer-audio-type').first().text());
       if (!audioType) {
         const hrefs = new Set();
         $item.find('a[href*="/catalog/"]').each((__, a) => hrefs.add($(a).attr('href')));
         if (hrefs.size === 1) audioType = clean($item.text());
       }
-      const title = clean($(elem).attr('title') \vert{}\vert{}$(elem).text());
+      const title = clean($(elem).attr('title') || $(elem).text());
 
       const prev = byUrl.get(href);
       if (!prev) {
@@ -324,8 +327,8 @@ async function extractStarckMagnets(postUrl) {
     }
 
     $('a[href^="magnet:"]').each((_, elem) => {
-      const $a =$(elem);
-      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
+      const $a = $(elem);
+      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
 
       const item = makeItem($a.attr('href'), context, postAudio, STARCK_NAME);
       if (!item || seen.has(item.hash)) return;
@@ -411,7 +414,7 @@ function parseStarckNetPost(html, imdbId) {
     const groupAudio = detectAudio(groupName);
 
     $(group).find('.o-arquivo').each((__, file) => {
-      const $file =$(file);
+      const $file = $(file);
       const magnet = $file.find('a[href^="magnet:"]').first().attr('href');
       if (!magnet) return;
 
@@ -424,7 +427,8 @@ function parseStarckNetPost(html, imdbId) {
     });
   });
 
-  if (items.length === 0 && $('.o-lista').length === 0) {$('a[href^="magnet:"]').each((_, a) => {
+  if (items.length === 0 && $('.o-lista').length === 0) {
+    $('a[href^="magnet:"]').each((_, a) => {
       const context = clean($(a).parent().text());
       add(makeItem($(a).attr('href'), context, null, STARCKNET_NAME));
     });
@@ -494,8 +498,8 @@ async function searchComando(queryTitle) {
       if (href.startsWith('/')) href = COMANDO_URL + href;
       if (!href.startsWith(COMANDO_URL) || href.includes('/?s=')) return;
 
-      const $item =$(elem).closest('article, .post, .entry');
-      const title = clean($(elem).text() \vert{}\vert{}$item.find('h2, .entry-title').text());
+      const $item = $(elem).closest('article, .post, .entry');
+      const title = clean($(elem).text() || $item.find('h2, .entry-title').text());
       const metaText = clean($item.text());
 
       if (!byUrl.has(href)) {
@@ -546,7 +550,7 @@ async function extractComandoMagnets(postUrl, imdbId) {
     }
 
     const $ = cheerio.load(html);
-    const postAudio = detectAudio(clean($('h1').text() + ' ' +$('title').text()));
+    const postAudio = detectAudio(clean($('h1').text() + ' ' + $('title').text()));
     if (postAudio && postAudio.rank === 2) {
       console.log(`[Comando] Post legendado ignorado: ${postUrl}`);
       return [];
@@ -556,8 +560,8 @@ async function extractComandoMagnets(postUrl, imdbId) {
     const seen = new Set();
 
     $('a[href^="magnet:"]').each((_, elem) => {
-      const $a =$(elem);
-      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
+      const $a = $(elem);
+      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
 
       const item = makeItem($a.attr('href'), context, postAudio, COMANDO_NAME);
       if (!item || seen.has(item.hash)) return;
