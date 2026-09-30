@@ -10,6 +10,7 @@ cfResolver.setServers(['1.1.1.1', '1.0.0.1']);
 
 function cloudflareLookup(hostname, options, callback) {
   cfResolver.resolve4(hostname, (err, addresses) => {
+    console.log(`[DNS] ${hostname} ->`, err ? err.message : addresses.join(', '));
     if (err || !addresses || !addresses.length) {
       return dns.lookup(hostname, options, callback);
     }
