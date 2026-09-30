@@ -13,14 +13,14 @@ const HTTP_HEADERS = {
   'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
 };
 
-// 1. Definição do Manifest do Stremio
+// 1. Manifest: este addon atende só FILMES (as séries do site vêm em pacote completo)
 const manifest = {
   id: 'org.netcine.addon',
-  version: '1.0.0',
+  version: '1.1.0',
   name: 'NetCine Addon',
-  description: 'Procura de conteúdos e torrents em português',
+  description: 'Links magnet de filmes em português',
   resources: ['stream'],
-  types: ['movie', 'series'],
+  types: ['movie'],
   idPrefixes: ['tt'],
   catalogs: []
 };
@@ -58,17 +58,14 @@ function safeDecode(str) {
 
 // ---------- TMDB: converte o ID do IMDb no título ----------
 
-async function getTmdbMeta(type, imdbId) {
+async function getTmdbMovie(imdbId) {
   try {
     const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id&language=pt-BR`;
     const res = await axios.get(findUrl, { timeout: 5000 });
 
-    if (type === 'movie' && res.data.movie_results && res.data.movie_results.length > 0) {
+    if (res.data.movie_results && res.data.movie_results.length > 0) {
       const movie = res.data.movie_results[0];
       return { title: movie.title, originalTitle: movie.original_title };
-    } else if (type === 'series' && res.data.tv_results && res.data.tv_results.length > 0) {
-      const tv = res.data.tv_results[0];
-      return { title: tv.name, originalTitle: tv.original_name };
     }
   } catch (err) {
     console.error(`[NetCine] Erro TMDB (${imdbId}):`, err.message);
@@ -116,46 +113,25 @@ async function searchPosts(queryTitle) {
   }
 }
 
-// Escolhe o post certo (mesmo título e, para série, a temporada certa)
-function pickPost(posts, titles, season) {
+// Escolhe o post do filme (mesmo título, ignorando posts de temporada de série)
+function pickMovie(posts, titles) {
   const titleSlugs = titles.map(slugify).filter(Boolean);
 
-  const candidates = posts.filter((p) => {
+  const found = posts.find((p) => {
     const s = postSlug(p.url);
+    if (/temporada/.test(s)) return false;
     return titleSlugs.some((t) => s === t || s.startsWith(t + '-'));
   });
 
-  if (season) {
-    const re = new RegExp(`(^|-)${parseInt(season, 10)}-temporada`);
-    const found = candidates.find((p) => re.test(postSlug(p.url)));
-    return found ? found.url : null;
+  if (!found && posts.length > 0) {
+    console.log(`[NetCine] Nenhum slug bateu com ${JSON.stringify(titleSlugs)}. Primeiros resultados: ${posts.slice(0, 5).map((p) => postSlug(p.url)).join(' | ')}`);
   }
-
-  const movie = candidates.find((p) => !/temporada/.test(postSlug(p.url)));
-  return movie ? movie.url : null;
+  return found ? found.url : null;
 }
 
 // ---------- Extração dos magnets ----------
 
-// Descobre quais episódios o link cobre: "EPISÓDIOS 01 AO 03:" -> [1,3], "EPISÓDIO 04:" -> [4,4]
-function parseEpisodeRange(label, dn) {
-  let m = (label || '').match(/EPIS[OÓó]DIOS?\s*(\d+)(?:\s*(?:AO?|AT[ÉEé]|-)\s*(\d+))?/i);
-  if (m) {
-    const a = parseInt(m[1], 10);
-    const b = m[2] ? parseInt(m[2], 10) : a;
-    return [Math.min(a, b), Math.max(a, b)];
-  }
-
-  m = (dn || '').match(/S\d+E(\d+(?:-\d+)*)/i);
-  if (m) {
-    const nums = m[1].split('-').map((n) => parseInt(n, 10));
-    return [Math.min(...nums), Math.max(...nums)];
-  }
-
-  return null;
-}
-
-async function extractMagnets(postUrl, season, episode) {
+async function extractMagnets(postUrl) {
   const streams = [];
   try {
     const { data: html } = await axios.get(postUrl, { timeout: 10000, headers: HTTP_HEADERS });
@@ -172,39 +148,11 @@ async function extractMagnets(postUrl, season, episode) {
       const quality = $a.text().replace(/\s+/g, ' ').trim();
       const version = $p.prevAll('h3').first().text().replace(/\s+/g, ' ').trim();
 
-      const ep = episode ? parseInt(episode, 10) : null;
-      const range = season && episode ? parseEpisodeRange(label, dn) : null;
+      const line1 = [label, quality].filter(Boolean).join(' · ') || `Opção ${index + 1}`;
 
-      // Série: só mostra o episódio pedido (ou pacotes que o incluem)
-      if (range && (ep < range[0] || ep > range[1])) return;
-
-      const isPack = !!range && range[1] > range[0];
-      const line1 = [label || `Opção ${index + 1}`, quality].filter(Boolean).join(' · ');
-
-      // 1) Torrent direto: o player abre o arquivo do episódio escolhido dentro do pacote
-      const hashMatch = magnetUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/);
-      if (hashMatch && hashMatch[1].length === 40) {
-        const infoHash = hashMatch[1].toLowerCase();
-        const trackers = [...magnetUrl.matchAll(/[?&]tr=([^&]+)/g)]
-          .map((m) => safeDecode(m[1]).replace(/\/anunciar$/i, '/announce'));
-
-        const torrentStream = {
-          name: 'NetCine',
-          title: isPack
-            ? `▶ Ep ${ep} do pacote (${label})\n${[quality, version].filter(Boolean).join(' · ')}`
-            : `▶ ${[line1, version].filter(Boolean).join('\n')}`,
-          infoHash,
-          sources: trackers.map((t) => `tracker:${t}`).concat([`dht:${infoHash}`])
-        };
-        // Assume que os arquivos do pacote estão em ordem (ep 1, ep 2, ep 3...)
-        if (isPack) torrentStream.fileIdx = ep - range[0];
-        streams.push(torrentStream);
-      }
-
-      // 2) Link magnet para abrir no app de torrent (mostra todos os arquivos do pacote)
       streams.push({
         name: 'NetCine',
-        title: `🧲 Abrir magnet: ${[line1, version].filter(Boolean).join('\n')}`,
+        title: [line1, version, dn].filter(Boolean).join('\n'),
         externalUrl: magnetUrl
       });
     });
@@ -218,12 +166,14 @@ async function extractMagnets(postUrl, season, episode) {
 builder.defineStreamHandler(async ({ type, id }) => {
   console.log(`[NetCine] Solicitação de stream para ${type} ID: ${id}`);
 
-  const parts = id.split(':');
-  const imdbId = parts[0];
-  const season = parts[1] ? parts[1] : null;
-  const episode = parts[2] ? parts[2] : null;
+  // Séries não são atendidas por este addon
+  if (type !== 'movie') {
+    return { streams: [] };
+  }
 
-  const meta = await getTmdbMeta(type, imdbId);
+  const imdbId = id.split(':')[0];
+
+  const meta = await getTmdbMovie(imdbId);
   if (!meta) {
     console.log(`[NetCine] Metadados não encontrados no TMDB para ID ${imdbId}`);
     return { streams: [] };
@@ -234,30 +184,21 @@ builder.defineStreamHandler(async ({ type, id }) => {
   const titles = [meta.title];
   if (meta.originalTitle && meta.originalTitle !== meta.title) titles.push(meta.originalTitle);
 
-  // 1) Busca pelo título normal
+  // Busca pelo título normal (o ID do IMDb nunca vai para o site)
   let postUrl = null;
   for (const t of titles) {
     const posts = await searchPosts(t);
-    postUrl = pickPost(posts, titles, season);
+    postUrl = pickMovie(posts, titles);
     if (postUrl) break;
   }
 
-  // 2) Série sem a temporada na lista: tenta "Título N temporada"
-  if (!postUrl && season) {
-    for (const t of titles) {
-      const posts = await searchPosts(`${t} ${season} temporada`);
-      postUrl = pickPost(posts, titles, season);
-      if (postUrl) break;
-    }
-  }
-
   if (!postUrl) {
-    console.log(`[NetCine] Nenhum post encontrado para: ${meta.title}${season ? ' temporada ' + season : ''}`);
+    console.log(`[NetCine] Nenhum post encontrado para: ${meta.title}`);
     return { streams: [] };
   }
 
   console.log(`[NetCine] Post encontrado: ${postUrl}`);
-  const streams = await extractMagnets(postUrl, season, episode);
+  const streams = await extractMagnets(postUrl);
   console.log(`[NetCine] ${streams.length} link(s) magnet retornados`);
   return { streams };
 });
