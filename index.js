@@ -2,9 +2,12 @@ const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-const BASE_URL = 'https://starckfilmes-v24.com';
+// Sites de onde os links são puxados (configuráveis via variáveis de ambiente no Railway)
+const STARCK_URL = (process.env.STARCK_URL || 'https://starckfilmes-v24.com').replace(/\/+$/, '');
+const STARCKNET_URL = (process.env.STARCKNET_URL || 'https://starckfilmesnet.com').replace(/\/+$/, '');
+const COMANDO_URL = (process.env.COMANDO_URL || 'https://comandotorrents.org').replace(/\/+$/, '');
 
-// Defina TMDB_API_KEY nas variáveis de ambiente e depois remova o fallback abaixo
+// Defina TMDB_API_KEY nas variáveis de ambiente
 const TMDB_API_KEY = process.env.TMDB_API_KEY || 'd8e8e85d692358d3b5db2cfd08487457';
 
 const HTTP_HEADERS = {
@@ -13,10 +16,10 @@ const HTTP_HEADERS = {
   'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
 };
 
-// 1. Manifest: este addon atende só FILMES (as séries do site vêm em pacote completo)
+// 1. Manifest: este addon atende só FILMES
 const manifest = {
   id: 'org.netcine.addon',
-  version: '1.2.0',
+  version: '1.4.0',
   name: 'NetCine Addon',
   description: 'Links magnet de filmes em Dual Áudio',
   resources: ['stream'],
@@ -43,11 +46,6 @@ function slugify(str) {
   return normalizeText(str).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
-function postSlug(url) {
-  const m = (url || '').match(/\/catalog\/([^/?#]+)/);
-  return m ? safeDecode(m[1]) : '';
-}
-
 function safeDecode(str) {
   try {
     return decodeURIComponent((str || '').replace(/\+/g, ' '));
@@ -60,11 +58,16 @@ function clean(str) {
   return (str || '').replace(/\s+/g, ' ').trim();
 }
 
+function postSlug(url) {
+  const m = (url || '').match(/\/catalog\/([^/?#]+)/) || (url || '').match(/\/([^/?#]+)\/?$/);
+  return m ? safeDecode(m[1]) : '';
+}
+
 // Áudio: dual (0) > dublado (1). Legendado (2) é descartado. Desconhecido = null
 function detectAudio(text) {
   const t = normalizeText(text);
   if (/dual/.test(t)) return { rank: 0, label: '🔊 Dual Áudio' };
-  if (/dublad|dublagem|nacional/.test(t)) return { rank: 1, label: '🔊 Dublado' };
+  if (/dublad|dublagem|nacional|\bdub\b/.test(t)) return { rank: 1, label: '🔊 Dublado' };
   if (/legendad|subtitulad|\bleg\b/.test(t)) return { rank: 2, label: '💬 Legendado' };
   return null;
 }
@@ -90,158 +93,8 @@ async function getTmdbMovie(imdbId) {
   return null;
 }
 
-// ---------- Busca no site (pelo título normal) ----------
-
-async function searchPosts(queryTitle) {
-  const term = (queryTitle || '').trim();
-  if (!term) return [];
-
-  const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(term)}`;
-  console.log(`[NetCine] Pesquisando no site: ${searchUrl}`);
-
-  try {
-    const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS });
-    const $ = cheerio.load(html);
-
-    const byUrl = new Map();
-
-    // Os posts do site ficam todos em /catalog/<slug>/
-    $('a[href*="/catalog/"]').each((_, elem) => {
-      let href = $(elem).attr('href');
-      if (!href) return;
-      if (href.startsWith('/')) href = BASE_URL + href;
-      if (!href.startsWith(BASE_URL)) return;
-
-      // Cada item da lista mostra o tipo de áudio (Dual Áudio, Dublado, Legendado)
-      const $item = $(elem).closest('.item, .sub-item, article, li');
-      let audioType = clean($item.find('.footer-audio-type').first().text());
-      if (!audioType) {
-        // Se o selo tiver outra classe: usa o texto do card, desde que ele seja de um post só
-        const hrefs = new Set();
-        $item.find('a[href*="/catalog/"]').each((__, a) => hrefs.add($(a).attr('href')));
-        if (hrefs.size === 1) audioType = clean($item.text());
-      }
-      const title = clean($(elem).attr('title') || $(elem).text());
-
-      const prev = byUrl.get(href);
-      if (!prev) {
-        byUrl.set(href, { url: href, title, audioType });
-      } else {
-        if (!prev.audioType && audioType) prev.audioType = audioType;
-        if (!prev.title && title) prev.title = title;
-      }
-    });
-
-    const posts = [...byUrl.values()];
-    console.log(`[NetCine] ${posts.length} posts encontrados para "${term}"`);
-    if (posts.length === 0) {
-      console.log(`[NetCine] HTML recebido (${html.length} chars): ${html.slice(0, 300).replace(/\s+/g, ' ')}`);
-    }
-    return posts;
-  } catch (err) {
-    console.error(`[NetCine] Erro na busca HTTP:`, err.message);
-    return [];
-  }
-}
-
-// O que pode vir depois do título no slug: ano e/ou data (dd-mm-aaaa) e, às vezes, o tipo de áudio
-const SLUG_SUFFIX = /^(-\d{4})?(-\d{2}-\d{2}-\d{4})?(-(dual-audio|dublado|legendado|nacional))?$/;
-
-// Lista os posts do filme, sem legendado, com Dual Áudio primeiro
-function pickMovieCandidates(posts, titles, year) {
-  const titleSlugs = titles.map(slugify).filter(Boolean);
-
-  const isSameMovie = (slug, strict) =>
-    titleSlugs.some((t) => {
-      if (slug === t) return true;
-      if (!slug.startsWith(t + '-')) return false;
-      if (strict) return SLUG_SUFFIX.test(slug.slice(t.length));
-      return !!year && new RegExp(`-${year}(-|$)`).test(slug);
-    });
-
-  const movies = posts.filter((p) => !/temporada/.test(postSlug(p.url)));
-
-  let matches = movies.filter((p) => isSameMovie(postSlug(p.url), true));
-  if (matches.length === 0) matches = movies.filter((p) => isSameMovie(postSlug(p.url), false));
-
-  if (matches.length === 0 && posts.length > 0) {
-    console.log(`[NetCine] Nenhum slug bateu com ${JSON.stringify(titleSlugs)}. Primeiros resultados: ${posts.slice(0, 5).map((p) => postSlug(p.url)).join(' | ')}`);
-  }
-
-  return matches
-    .map((p) => {
-      const audio = detectAudio(`${p.audioType} ${p.title} ${postSlug(p.url)}`);
-      return { url: p.url, rank: audio ? audio.rank : 3 }; // 3 = ainda não sabemos (confere na página)
-    })
-    .filter((c) => c.rank !== 2) // nada de legendado
-    .sort((a, b) => a.rank - b.rank)
-    .map((c) => c.url);
-}
-
-// ---------- Extração dos magnets ----------
-
-const RES_RANK = { '2160p': 4, '1440p': 3, '1080p': 2, '720p': 1, '480p': 0 };
-
-function formatBytes(bytes) {
-  const n = Number(bytes);
-  if (!n || n < 0) return '';
-  const gb = n / (1024 ** 3);
-  if (gb >= 1) return `${gb.toFixed(2)} GB`;
-  return `${Math.round(n / (1024 ** 2))} MB`;
-}
-
-function nearestHeading($, $a) {
-  let $node = $a;
-  for (let i = 0; i < 4 && $node.length; i++) {
-    const h = clean($node.prevAll('h2,h3,h4').first().text());
-    if (h) return h;
-    $node = $node.parent();
-  }
-  return '';
-}
-
-function parseInfo(dn, context, xl, postAudio) {
-  const all = `${dn} ${context}`;
-
-  // Nome do arquivo manda; depois o texto ao redor do link; por fim o áudio do post
-  const audio = detectAudio(dn) || detectAudio(context) || postAudio || { rank: 3, label: '🔊 Áudio não informado' };
-
-  let res = (all.match(/\b(2160p|4k|1440p|1080p|720p|480p)\b/i) || [])[1] || '';
-  res = res.toLowerCase() === '4k' ? '2160p' : res.toLowerCase();
-
-  let source = (all.match(/\b(WEB[-. ]?DL|WEB[-. ]?Rip|Blu[-. ]?Ray|BDRip|BRRip|REMUX|HDRip|HDTV|DVDRip|HDTS|HDCAM|CAM)\b/i) || [])[1] || '';
-  source = source.toUpperCase().replace(/[. ]/g, '-').replace('WEBDL', 'WEB-DL').replace('WEBRIP', 'WEBRip').replace('BLURAY', 'BluRay');
-
-  let codec = (all.match(/\b(x265|HEVC|H\.?265|x264|H\.?264|AV1)\b/i) || [])[1] || '';
-  codec = codec.replace(/^h\.?265$/i, 'H.265').replace(/^h\.?264$/i, 'H.264').replace(/^hevc$/i, 'HEVC');
-
-  const hdr = (all.match(/\b(HDR10\+?|HDR|Dolby[ .]?Vision)\b/i) || [])[1] || '';
-  const channels = (dn.match(/\b(7\.1|5\.1|2\.0)\b/) || [])[1] || '';
-
-  let size = formatBytes(xl);
-  if (!size) {
-    const m = all.match(/(\d+(?:[.,]\d+)?)\s*(GB|MB)/i);
-    if (m) size = `${m[1].replace(',', '.')} ${m[2].toUpperCase()}`;
-  }
-
-  return { audio, res, source, codec, hdr, channels, size };
-}
-
-function buildTitle(info, dn) {
-  const tech = [info.res, info.source, info.codec, info.hdr].filter(Boolean).join(' · ');
-  const extra = [info.size ? `💾 ${info.size}` : '', info.channels ? `🔈 ${info.channels}` : ''].filter(Boolean).join('  ');
-
-  return [
-    info.audio.label,
-    tech ? `🎬 ${tech}` : '',
-    extra,
-    dn ? `📄 ${dn}` : ''
-  ].filter(Boolean).join('\n');
-}
-
 // ---------- Magnet: valida e reconstrói o link ----------
 
-// Hash em base32 (32 caracteres) -> hexadecimal (40 caracteres)
 function base32ToHex(b32) {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
   let bits = '';
@@ -257,12 +110,10 @@ function base32ToHex(b32) {
   return hex;
 }
 
-// Devolve um magnet limpo, com hash de 40 ou 64 caracteres hexadecimais, ou null se o hash for inválido
 function normalizeMagnet(raw) {
   const href = (raw || '').trim();
   const m = href.match(/xt=urn:btih:([A-Za-z0-9]+)/i);
   if (!m) {
-    console.log(`[NetCine] Magnet sem hash ignorado: ${href.slice(0, 120)}`);
     return null;
   }
 
@@ -270,7 +121,6 @@ function normalizeMagnet(raw) {
   if (/^[A-Za-z2-7]{32}$/.test(hash)) hash = base32ToHex(hash);
 
   if (!/^([a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/.test(hash)) {
-    console.log(`[NetCine] Magnet ignorado (hash inválido, ${m[1].length} caracteres): ${href.slice(0, 160)}`);
     return null;
   }
   hash = hash.toLowerCase();
@@ -296,62 +146,455 @@ function normalizeMagnet(raw) {
     + trackers.map((t) => `&tr=${encodeURIComponent(t)}`).join('');
 }
 
-async function extractMagnets(postUrl) {
+// ---------- Informações do link ----------
+
+const RES_RANK = { '2160p': 4, '1440p': 3, '1080p': 2, '720p': 1, '480p': 0 };
+
+function formatBytes(bytes) {
+  const n = Number(bytes);
+  if (!n || n < 0) return '';
+  const gb = n / (1024 ** 3);
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  return `${Math.round(n / (1024 ** 2))} MB`;
+}
+
+function parseInfo(dn, context, xl, postAudio) {
+  const all = `${dn} ${context}`;
+
+  const audio = detectAudio(dn) || detectAudio(context) || postAudio || { rank: 3, label: '🔊 Áudio não informado' };
+
+  let res = (all.match(/\b(2160p|4k|1440p|1080p|720p|480p)\b/i) || [])[1] || '';
+  res = res.toLowerCase() === '4k' ? '2160p' : res.toLowerCase();
+
+  let source = (all.match(/\b(WEB[-. ]?DL|WEB[-. ]?Rip|Blu[-. ]?Ray|BDRip|BRRip|REMUX|HDRip|HDTV|DVDRip|HDTS|HDCAM|CAM)\b/i) || [])[1] || '';
+  source = source.toUpperCase().replace(/[. ]/g, '-').replace('WEBDL', 'WEB-DL').replace('WEBRIP', 'WEBRip').replace('BLURAY', 'BluRay');
+
+  let codec = (all.match(/\b(x265|HEVC|H\.?265|x264|H\.?264|AV1)\b/i) || [])[1] || '';
+  codec = codec.replace(/^h\.?265$/i, 'H.265').replace(/^h\.?264$/i, 'H.264').replace(/^hevc$/i, 'HEVC');
+
+  const hdr = (all.match(/\b(HDR10\+?|HDR|Dolby[ .]?Vision)\b/i) || [])[1] || '';
+  const channels = (dn.match(/\b(7\.1|5\.1|2\.0)\b/) || [])[1] || '';
+
+  let size = formatBytes(xl);
+  if (!size) {
+    const m = all.match(/(\d+(?:[.,]\d+)?)\s*(GB|MB)/i);
+    if (m) size = `${m[1].replace(',', '.')} ${m[2].toUpperCase()}`;
+  }
+
+  return { audio, res, source, codec, hdr, channels, size };
+}
+
+function buildTitle(info, dn, siteName) {
+  const tech = [info.res, info.source, info.codec, info.hdr].filter(Boolean).join(' · ');
+  const extra = [info.size ? `💾 ${info.size}` : '', info.channels ? `🔈 ${info.channels}` : ''].filter(Boolean).join('  ');
+
+  return [
+    info.audio.label,
+    tech ? `🎬 ${tech}` : '',
+    extra,
+    siteName ? `🌐 ${siteName}` : '',
+    dn ? `📄 ${dn}` : ''
+  ].filter(Boolean).join('\n');
+}
+
+function makeItem(rawMagnet, context, postAudio, siteName) {
+  const magnetUrl = normalizeMagnet(rawMagnet);
+  if (!magnetUrl) return null;
+
+  const hash = (magnetUrl.match(/xt=urn:btih:([a-f0-9]+)/) || [])[1];
+  const dn = clean(safeDecode((magnetUrl.match(/[?&]dn=([^&]+)/) || [])[1] || ''));
+  const xl = ((rawMagnet || '').match(/[?&](?:amp;)?xl=(\d+)/) || [])[1];
+
+  const info = parseInfo(dn, context, xl, postAudio);
+  if (info.audio.rank === 2) return null;
+
+  return {
+    hash,
+    audioRank: info.audio.rank,
+    resRank: RES_RANK[info.res] !== undefined ? RES_RANK[info.res] : -1,
+    stream: {
+      name: `NetCine${info.res ? ' ' + info.res : ''}`,
+      title: buildTitle(info, dn, siteName),
+      externalUrl: magnetUrl
+    }
+  };
+}
+
+function nearestHeading($,$a) {
+  let $node =$a;
+  for (let i = 0; i < 4 && $node.length; i++) {
+    const h = clean($node.prevAll('h2,h3,h4').first().text());
+    if (h) return h;
+    $node =$node.parent();
+  }
+  return '';
+}
+
+// =====================================================================
+// FONTE 1: starckfilmes-v24.com
+// =====================================================================
+
+const STARCK_NAME = 'Starck Filmes';
+
+async function searchStarck(queryTitle) {
+  const term = (queryTitle || '').trim();
+  if (!term) return [];
+
+  const searchUrl = `${STARCK_URL}/?s=${encodeURIComponent(term)}`;
+  console.log(`[Starck] Pesquisando: ${searchUrl}`);
+
+  try {
+    const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS });
+    const $ = cheerio.load(html);
+
+    const byUrl = new Map();
+
+    $('a[href*="/catalog/"]').each((_, elem) => {
+      let href = $(elem).attr('href');
+      if (!href) return;
+      if (href.startsWith('/')) href = STARCK_URL + href;
+      if (!href.startsWith(STARCK_URL)) return;
+
+      const $item =$(elem).closest('.item, .sub-item, article, li');
+      let audioType = clean($item.find('.footer-audio-type').first().text());
+      if (!audioType) {
+        const hrefs = new Set();
+        $item.find('a[href*="/catalog/"]').each((__, a) => hrefs.add($(a).attr('href')));
+        if (hrefs.size === 1) audioType = clean($item.text());
+      }
+      const title = clean($(elem).attr('title') \vert{}\vert{}$(elem).text());
+
+      const prev = byUrl.get(href);
+      if (!prev) {
+        byUrl.set(href, { url: href, title, audioType });
+      } else {
+        if (!prev.audioType && audioType) prev.audioType = audioType;
+        if (!prev.title && title) prev.title = title;
+      }
+    });
+
+    const posts = [...byUrl.values()];
+    console.log(`[Starck] ${posts.length} posts encontrados para "${term}"`);
+    return posts;
+  } catch (err) {
+    console.error(`[Starck] Erro na busca HTTP:`, err.message);
+    return [];
+  }
+}
+
+const SLUG_SUFFIX = /^(-\d{4})?(-\d{2}-\d{2}-\d{4})?(-(dual-audio|dublado|legendado|nacional))?$/;
+
+function pickStarckCandidates(posts, titles, year) {
+  const titleSlugs = titles.map(slugify).filter(Boolean);
+
+  const isSameMovie = (slug, strict) =>
+    titleSlugs.some((t) => {
+      if (slug === t) return true;
+      if (!slug.startsWith(t + '-')) return false;
+      if (strict) return SLUG_SUFFIX.test(slug.slice(t.length));
+      return !!year && new RegExp(`-${year}(-|$)`).test(slug);
+    });
+
+  const movies = posts.filter((p) => !/temporada/.test(postSlug(p.url)));
+
+  let matches = movies.filter((p) => isSameMovie(postSlug(p.url), true));
+  if (matches.length === 0) matches = movies.filter((p) => isSameMovie(postSlug(p.url), false));
+
+  return matches
+    .map((p) => {
+      const audio = detectAudio(`${p.audioType} ${p.title} ${postSlug(p.url)}`);
+      return { url: p.url, rank: audio ? audio.rank : 3 };
+    })
+    .filter((c) => c.rank !== 2)
+    .sort((a, b) => a.rank - b.rank)
+    .map((c) => c.url);
+}
+
+async function extractStarckMagnets(postUrl) {
   const items = [];
-  const seenHashes = new Set();
+  const seen = new Set();
 
   try {
     const { data: html } = await axios.get(postUrl, { timeout: 10000, headers: HTTP_HEADERS });
     const $ = cheerio.load(html);
 
-    // O título da página diz o áudio: "... Dual Áudio Download" ou "... Legendado Download"
     const postAudio = detectAudio(clean($('h1').first().text()));
     if (postAudio && postAudio.rank === 2) {
-      console.log(`[NetCine] Post legendado ignorado: ${postUrl}`);
       return [];
     }
 
     $('a[href^="magnet:"]').each((_, elem) => {
-      const $a = $(elem);
-      // Reconstrói o magnet limpo (o site deixa espaços sobrando e alguns hashes vêm fora do padrão)
-      const magnetUrl = normalizeMagnet($a.attr('href'));
-      if (!magnetUrl) return;
+      const $a =$(elem);
+      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
 
-      const hash = ((magnetUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/) || [])[1] || magnetUrl).toLowerCase();
-      if (seenHashes.has(hash)) return;
-      seenHashes.add(hash);
-
-      const dn = clean(safeDecode((magnetUrl.match(/[?&]dn=([^&]+)/) || [])[1] || ''));
-      const xl = (magnetUrl.match(/[?&]xl=(\d+)/) || [])[1];
-      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
-
-      const info = parseInfo(dn, context, xl, postAudio);
-      if (info.audio.rank === 2) return; // nada de legendado
-
-      items.push({
-        audioRank: info.audio.rank,
-        resRank: RES_RANK[info.res] !== undefined ? RES_RANK[info.res] : -1,
-        stream: {
-          name: `NetCine${info.res ? ' ' + info.res : ''}`,
-          title: buildTitle(info, dn),
-          externalUrl: magnetUrl
-        }
-      });
+      const item = makeItem($a.attr('href'), context, postAudio, STARCK_NAME);
+      if (!item || seen.has(item.hash)) return;
+      seen.add(item.hash);
+      items.push(item);
     });
   } catch (err) {
-    console.error(`[NetCine] Erro ao extrair magnets:`, err.message);
+    console.error(`[Starck] Erro ao extrair magnets:`, err.message);
   }
-
-  // Dual Áudio primeiro, depois Dublado; dentro de cada grupo, maior resolução primeiro
-  items.sort((a, b) => a.audioRank - b.audioRank || b.resRank - a.resRank);
-  return items.map((i) => i.stream);
+  return items;
 }
 
-// 3. Handler principal do Stremio / Nuvio
+async function getFromStarck(titles, meta) {
+  let candidates = [];
+  for (const t of titles) {
+    const posts = await searchStarck(t);
+    candidates = pickStarckCandidates(posts, titles, meta.year);
+    if (candidates.length > 0) break;
+  }
+
+  for (const postUrl of candidates.slice(0, 3)) {
+    console.log(`[Starck] Testando post: ${postUrl}`);
+    const items = await extractStarckMagnets(postUrl);
+    if (items.length > 0) return items;
+  }
+  return [];
+}
+
+// =====================================================================
+// FONTE 2: starckfilmesnet.com
+// =====================================================================
+
+const STARCKNET_NAME = 'StarckFilmesNet';
+
+function parseStarckNetSearch(html) {
+  const $ = cheerio.load(html);
+  const byUrl = new Map();
+
+  $('a.o-card').each((_, elem) => {
+    const url = $(elem).attr('href');
+    if (!url || byUrl.has(url)) return;
+    const title = clean($(elem).find('.o-card-titulo').first().text());
+    const meta = clean($(elem).find('.o-card-meta').first().text());
+    const year = (meta.match(/\b(?:19|20)\d{2}\b/) || [])[0] || '';
+    byUrl.set(url, { url, title, meta, year });
+  });
+
+  return [...byUrl.values()];
+}
+
+function pickStarckNetCandidates(posts, titles, year) {
+  const titleSlugs = titles.map(slugify).filter(Boolean);
+
+  return posts
+    .filter((p) => !/temporada/.test(normalizeText(p.title)) && !/temporada/.test(p.url))
+    .filter((p) => titleSlugs.includes(slugify(p.title)))
+    .filter((p) => !year || !p.year || Math.abs(Number(p.year) - Number(year)) <= 1)
+    .map((p) => {
+      const audio = detectAudio(p.meta);
+      return { url: p.url, rank: audio ? audio.rank : 3 };
+    })
+    .filter((c) => c.rank !== 2)
+    .sort((a, b) => a.rank - b.rank)
+    .map((c) => c.url);
+}
+
+function parseStarckNetPost(html, imdbId) {
+  const pageImdb = (html.match(/imdb\.com\/title\/(tt\d+)/) || [])[1];
+  if (pageImdb && imdbId && pageImdb !== imdbId) return { items: [], mismatch: pageImdb };
+
+  const $ = cheerio.load(html);
+  const items = [];
+  const seen = new Set();
+
+  const add = (item) => {
+    if (!item || seen.has(item.hash)) return;
+    seen.add(item.hash);
+    items.push(item);
+  };
+
+  $('.o-lista').each((_, group) => {
+    const groupName = clean($(group).find('.o-grupo-nome').first().text());
+    const groupAudio = detectAudio(groupName);
+
+    $(group).find('.o-arquivo').each((__, file) => {
+      const $file =$(file);
+      const magnet = $file.find('a[href^="magnet:"]').first().attr('href');
+      if (!magnet) return;
+
+      const quality = clean($file.find('.o-q').first().text());
+      const size = clean($file.find('.o-arquivo-info b').first().text());
+      const source = clean($file.find('.o-arquivo-info small').text());
+      const context = clean(`${groupName} ${quality} ${source} ${size}`);
+
+      add(makeItem(magnet, context, groupAudio, STARCKNET_NAME));
+    });
+  });
+
+  if (items.length === 0 && $('.o-lista').length === 0) {$('a[href^="magnet:"]').each((_, a) => {
+      const context = clean($(a).parent().text());
+      add(makeItem($(a).attr('href'), context, null, STARCKNET_NAME));
+    });
+  }
+
+  return { items, mismatch: null };
+}
+
+async function getFromStarckNet(titles, meta, imdbId) {
+  let candidates = [];
+  for (const t of titles) {
+    const term = (t || '').trim();
+    if (!term) continue;
+    const searchUrl = `${STARCKNET_URL}/?s=${encodeURIComponent(term)}`;
+    console.log(`[StarckNet] Pesquisando: ${searchUrl}`);
+
+    try {
+      const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS });
+      const posts = parseStarckNetSearch(html);
+      console.log(`[StarckNet] ${posts.length} posts encontrados para "${term}"`);
+      candidates = pickStarckNetCandidates(posts, titles, meta.year);
+    } catch (err) {
+      console.error(`[StarckNet] Erro na busca HTTP:`, err.message);
+    }
+    if (candidates.length > 0) break;
+  }
+
+  for (const postUrl of candidates.slice(0, 3)) {
+    console.log(`[StarckNet] Testando post: ${postUrl}`);
+    try {
+      const { data: html } = await axios.get(postUrl, { timeout: 10000, headers: HTTP_HEADERS });
+      const { items, mismatch } = parseStarckNetPost(html, imdbId);
+      if (mismatch) {
+        console.log(`[StarckNet] Post ignorado (IMDb ${mismatch} não é ${imdbId}): ${postUrl}`);
+        continue;
+      }
+      if (items.length > 0) return items;
+    } catch (err) {
+      console.error(`[StarckNet] Erro ao abrir o post:`, err.message);
+    }
+  }
+  return [];
+}
+
+// =====================================================================
+// FONTE 3: Comando Torrents
+// =====================================================================
+
+const COMANDO_NAME = 'Comando Torrents';
+
+async function searchComando(queryTitle) {
+  const term = (queryTitle || '').trim();
+  if (!term) return [];
+
+  const searchUrl = `${COMANDO_URL}/?s=${encodeURIComponent(term)}`;
+  console.log(`[Comando] Pesquisando: ${searchUrl}`);
+
+  try {
+    const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS });
+    const $ = cheerio.load(html);
+
+    const byUrl = new Map();
+
+    $('article a[href], .post-title a[href], .entry-title a[href], h2 a[href]').each((_, elem) => {
+      let href = $(elem).attr('href');
+      if (!href) return;
+      if (href.startsWith('/')) href = COMANDO_URL + href;
+      if (!href.startsWith(COMANDO_URL) || href.includes('/?s=')) return;
+
+      const $item =$(elem).closest('article, .post, .entry');
+      const title = clean($(elem).text() \vert{}\vert{}$item.find('h2, .entry-title').text());
+      const metaText = clean($item.text());
+
+      if (!byUrl.has(href)) {
+        byUrl.set(href, { url: href, title, metaText });
+      }
+    });
+
+    const posts = [...byUrl.values()];
+    console.log(`[Comando] ${posts.length} posts encontrados para "${term}"`);
+    return posts;
+  } catch (err) {
+    console.error(`[Comando] Erro na busca HTTP:`, err.message);
+    return [];
+  }
+}
+
+function pickComandoCandidates(posts, titles, year) {
+  const titleSlugs = titles.map(slugify).filter(Boolean);
+
+  return posts
+    .filter((p) => !/temporada/.test(normalizeText(p.title)) && !/temporada/.test(p.url))
+    .filter((p) => {
+      const pSlug = slugify(p.title) || postSlug(p.url);
+      return titleSlugs.some((t) => pSlug.includes(t));
+    })
+    .filter((p) => {
+      if (!year) return true;
+      const yMatch = p.metaText.match(/\b(19|20)\d{2}\b/);
+      return !yMatch || Math.abs(Number(yMatch[0]) - Number(year)) <= 1;
+    })
+    .map((p) => {
+      const audio = detectAudio(`${p.title} ${p.metaText}`);
+      return { url: p.url, rank: audio ? audio.rank : 3 };
+    })
+    .filter((c) => c.rank !== 2)
+    .sort((a, b) => a.rank - b.rank)
+    .map((c) => c.url);
+}
+
+async function extractComandoMagnets(postUrl, imdbId) {
+  try {
+    const { data: html } = await axios.get(postUrl, { timeout: 10000, headers: HTTP_HEADERS });
+
+    const pageImdb = (html.match(/imdb\.com\/title\/(tt\d+)/) || [])[1];
+    if (pageImdb && imdbId && pageImdb !== imdbId) {
+      console.log(`[Comando] Post ignorado (IMDb ${pageImdb} não é ${imdbId}): ${postUrl}`);
+      return [];
+    }
+
+    const $ = cheerio.load(html);
+    const postAudio = detectAudio(clean($('h1').text() + ' ' +$('title').text()));
+    if (postAudio && postAudio.rank === 2) {
+      console.log(`[Comando] Post legendado ignorado: ${postUrl}`);
+      return [];
+    }
+
+    const items = [];
+    const seen = new Set();
+
+    $('a[href^="magnet:"]').each((_, elem) => {
+      const $a =$(elem);
+      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
+
+      const item = makeItem($a.attr('href'), context, postAudio, COMANDO_NAME);
+      if (!item || seen.has(item.hash)) return;
+      seen.add(item.hash);
+      items.push(item);
+    });
+
+    return items;
+  } catch (err) {
+    console.error(`[Comando] Erro ao extrair magnets:`, err.message);
+    return [];
+  }
+}
+
+async function getFromComando(titles, meta, imdbId) {
+  let candidates = [];
+  for (const t of titles) {
+    const posts = await searchComando(t);
+    candidates = pickComandoCandidates(posts, titles, meta.year);
+    if (candidates.length > 0) break;
+  }
+
+  for (const postUrl of candidates.slice(0, 3)) {
+    console.log(`[Comando] Testando post: ${postUrl}`);
+    const items = await extractComandoMagnets(postUrl, imdbId);
+    if (items.length > 0) return items;
+  }
+  return [];
+}
+
+// =====================================================================
+// Handler principal do Stremio / Nuvio
+// =====================================================================
+
 builder.defineStreamHandler(async ({ type, id }) => {
   console.log(`[NetCine] Solicitação de stream para ${type} ID: ${id}`);
 
-  // Séries não são atendidas por este addon
   if (type !== 'movie') {
     return { streams: [] };
   }
@@ -369,34 +612,30 @@ builder.defineStreamHandler(async ({ type, id }) => {
   const titles = [meta.title];
   if (meta.originalTitle && meta.originalTitle !== meta.title) titles.push(meta.originalTitle);
 
-  // Busca pelo título normal (o ID do IMDb nunca vai para o site)
-  let candidates = [];
-  for (const t of titles) {
-    const posts = await searchPosts(t);
-    candidates = pickMovieCandidates(posts, titles, meta.year);
-    if (candidates.length > 0) break;
-  }
+  // As três fontes são consultadas em paralelo
+  const [fromStarck, fromStarckNet, fromComando] = await Promise.all([
+    getFromStarck(titles, meta).catch((e) => { console.error('[Starck] Erro:', e.message); return []; }),
+    getFromStarckNet(titles, meta, imdbId).catch((e) => { console.error('[StarckNet] Erro:', e.message); return []; }),
+    getFromComando(titles, meta, imdbId).catch((e) => { console.error('[Comando] Erro:', e.message); return []; })
+  ]);
 
-  if (candidates.length === 0) {
-    console.log(`[NetCine] Nenhum post (sem legendado) encontrado para: ${meta.title}`);
-    return { streams: [] };
-  }
+  console.log(`[NetCine] Starck: ${fromStarck.length} | StarckNet: ${fromStarckNet.length} | Comando: ${fromComando.length}`);
 
-  // Tenta os posts em ordem (Dual Áudio primeiro) e usa o primeiro que tiver links
-  for (const postUrl of candidates.slice(0, 3)) {
-    console.log(`[NetCine] Testando post: ${postUrl}`);
-    const streams = await extractMagnets(postUrl);
-    if (streams.length > 0) {
-      console.log(`[NetCine] ${streams.length} link(s) magnet retornados`);
-      return { streams };
-    }
-  }
+  // Une os resultados, remove torrents duplicados (mesmo hash) e ordena por áudio e resolução
+  const seen = new Set();
+  const all = [...fromStarck, ...fromStarckNet, ...fromComando].filter((i) => {
+    if (seen.has(i.hash)) return false;
+    seen.add(i.hash);
+    return true;
+  });
+  all.sort((a, b) => a.audioRank - b.audioRank || b.resRank - a.resRank);
 
-  console.log(`[NetCine] Nenhum link Dual Áudio/Dublado para: ${meta.title}`);
-  return { streams: [] };
+  if (all.length === 0) {
+    console.log(`[NetCine] Nenhum link Dual Áudio/Dublado para: ${meta.title}`);
+  }
+  return { streams: all.map((i) => i.stream) };
 });
 
-// Tratamento global de exceções para evitar crashes
 process.on('uncaughtException', (err) => {
   console.error('[NetCine Erro Não Tratado]:', err.message);
 });
@@ -405,7 +644,6 @@ process.on('unhandledRejection', (reason) => {
   console.error('[NetCine Rejeição Não Tratada]:', reason);
 });
 
-// 4. Inicializa o servidor HTTP na porta dinâmica do ambiente
 const PORT = process.env.PORT || 8080;
 serveHTTP(builder.getInterface(), { port: PORT });
-console.log(`[NetCine Addon] Servidor rodando na porta ${PORT}`);
+console.log(`[NetCine Addon] Servidor a executar na porta ${PORT}`);
