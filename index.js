@@ -10,7 +10,6 @@ cfResolver.setServers(['1.1.1.1', '1.0.0.1']);
 
 function cloudflareLookup(hostname, options, callback) {
   cfResolver.resolve4(hostname, (err, addresses) => {
-    console.log(`[DNS] ${hostname} ->`, err ? err.message : addresses.join(', '));
     if (err || !addresses || !addresses.length) {
       return dns.lookup(hostname, options, callback);
     }
@@ -26,7 +25,7 @@ const comandoAgent = new https.Agent({ lookup: cloudflareLookup });
 // Sites de onde os links são puxados (configuráveis via variáveis de ambiente no Railway)
 const STARCK_URL = (process.env.STARCK_URL || 'https://starckfilmes-v24.com').replace(/\/+$/, '');
 const STARCKNET_URL = (process.env.STARCKNET_URL || 'https://starckfilmesnet.com').replace(/\/+$/, '');
-const COMANDO_URL = (process.env.COMANDO_URL || 'https://comandotorrents.org').replace(/\/+$/, '');
+const COMANDO_URL = (process.env.COMANDO_URL || 'https://comando1.com').replace(/\/+$/, '');
 
 // Defina TMDB_API_KEY nas variáveis de ambiente do Railway
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
