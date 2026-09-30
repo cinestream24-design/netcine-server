@@ -1,3 +1,8 @@
+// Polyfill para compatibilidade no Node.js 18
+if (typeof globalThis.File === 'undefined') {
+  globalThis.File = require('node:buffer').File;
+}
+
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -118,7 +123,6 @@ async function extractMagnets(postUrl, title, season, episode) {
     const streams = [];
 
     $('a').each((i, elem) => {
-      // Método seguro: itera sobre uma lista de atributos sem usar ||
       const attributes = ['href', 'data-magnet', 'data-link'];
       let rawHref = null;
 
