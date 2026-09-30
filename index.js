@@ -4,6 +4,11 @@ const cheerio = require('cheerio');
 
 const BASE_URL = 'https://starckfilmes-v24.com';
 
+// Defina TMDB_API_KEY nas variáveis de ambiente e depois remova o fallback abaixo
+const TMDB_API_KEY = process.env.TMDB_API_KEY || 'd8e8e85d692358d3b5db2cfd08487457';
+
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
 // 1. Definição do Manifest do Stremio
 const manifest = {
   id: 'org.netcine.addon',
@@ -31,10 +36,9 @@ function normalizeText(str) {
 // Busca o nome do filme/série na API do TMDB usando o ID do IMDb
 async function getTmdbMeta(type, imdbId) {
   try {
-    const tmdbApiKey = 'd8e8e85d692358d3b5db2cfd08487457';
-    const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${tmdbApiKey}&external_source=imdb_id&language=pt-BR`;
+    const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id&language=pt-BR`;
     const res = await axios.get(findUrl, { timeout: 5000 });
-    
+
     if (type === 'movie' && res.data.movie_results && res.data.movie_results.length > 0) {
       const movie = res.data.movie_results[0];
       return {
@@ -59,14 +63,12 @@ async function searchPostUrl(queryTitle) {
   try {
     const searchTerm = normalizeText(queryTitle);
     const searchUrl = `${BASE_URL}/?s=${encodeURIComponent(searchTerm)}`;
-    
+
     console.log(`[NetCine] Pesquisando no site: ${searchUrl}`);
 
     const { data: html } = await axios.get(searchUrl, {
       timeout: 8000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
+      headers: { 'User-Agent': USER_AGENT }
     });
 
     const $ = cheerio.load(html);
@@ -93,16 +95,14 @@ async function extractMagnets(postUrl, title, season, episode) {
   try {
     const { data: html } = await axios.get(postUrl, {
       timeout: 8000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
+      headers: { 'User-Agent': USER_AGENT }
     });
 
     const $ = cheerio.load(html);
 
     $('a[href^="magnet:"]').each((index, elem) => {
       const magnetUrl = $(elem).attr('href');
-      const linkText = $(elem).text().trim() \vert{}\vert{}$(elem).parent().text().trim();
+      const linkText = $(elem).text().trim() || $(elem).parent().text().trim();
 
       // Filtro para episódios se for série
       if (season && episode) {
@@ -127,7 +127,7 @@ async function extractMagnets(postUrl, title, season, episode) {
 // 3. Handler principal de busca do Stremio
 builder.defineStreamHandler(async ({ type, id }) => {
   console.log(`[NetCine] Solicitação de stream para ${type} ID: ${id}`);
-  
+
   const parts = id.split(':');
   const imdbId = parts[0];
   const season = parts[1] ? parts[1] : null;
