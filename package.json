@@ -1,16 +1,16 @@
 {
   "name": "netcine-server",
   "version": "2.2.0",
-  "description": "Servidor NetCine / NetStream - Addon de Filmes Torrent e TV ao Vivo para Nuvio e Stremio",
+  "description": "Addon Stremio/Nuvio - filmes em Dual Áudio",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "dependencies": {
-    "axios": "^1.6.8",
-    "cheerio": "^1.0.0-rc.12"
-  },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "cheerio": "1.0.0-rc.12"
   }
 }
