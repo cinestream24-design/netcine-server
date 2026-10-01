@@ -1,17 +1,16 @@
 {
-  "name": "netcine-stremio-addon",
-  "version": "1.0.0",
-  "description": "Stremio Addon para NetCine / Starck Filmes",
+  "name": "netcine-server",
+  "version": "2.2.0",
+  "description": "Servidor NetCine / NetStream - Addon de Filmes Torrent e TV ao Vivo para Nuvio e Stremio",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  },
   "dependencies": {
     "axios": "^1.6.8",
-    "cheerio": "1.0.0-rc.12",
-    "stremio-addon-sdk": "^1.6.0"
+    "cheerio": "^1.0.0-rc.12"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
