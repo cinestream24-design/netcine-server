@@ -5,6 +5,8 @@ const dns = require('dns');
 const https = require('https');
 const dgram = require('dgram');
 const crypto = require('crypto');
+const { chromium } = require('playwright');
+const Tesseract = require('tesseract.js');
 
 // DNS da Cloudflare usado SOMENTE nas requisições do Comando Torrents
 const cfResolver = new dns.Resolver();
@@ -28,6 +30,7 @@ const comandoAgent = new https.Agent({ lookup: cloudflareLookup });
 const STARCK_URL = (process.env.STARCK_URL || 'https://starckfilmes-v24.com').replace(/\/+$/, '');
 const STARCKNET_URL = (process.env.STARCKNET_URL || 'https://starckfilmesnet.com').replace(/\/+$/, '');
 const COMANDO_URL = (process.env.COMANDO_URL || 'https://comando1.com').replace(/\/+$/, '');
+const FLECHA_URL = (process.env.FLECHA_URL || 'https://flecha.lat').replace(/\/+$/, '');
 
 // Defina TMDB_API_KEY nas variáveis de ambiente do Railway
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
@@ -40,7 +43,6 @@ const HTTP_HEADERS = {
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
 };
-
 
 // ---------- Utilidades ----------
 
@@ -83,23 +85,25 @@ function detectAudio(text) {
   return null;
 }
 
-// ---------- TMDB: converte o ID do IMDb no título ----------
+// ---------- TMDB ----------
 
-async function getTmdbMovie(imdbId) {
+async function getTmdbMedia(id, type = 'movie') {
   try {
-    const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id&language=pt-BR`;
+    const endpoint = type === 'series' ? 'tv' : 'movie';
+    const findUrl = `https://api.themoviedb.org/3/find/${id}?api_key=${TMDB_API_KEY}&external_source=imdb_id&language=pt-BR`;
     const res = await axios.get(findUrl, { timeout: 5000 });
 
-    if (res.data.movie_results && res.data.movie_results.length > 0) {
-      const movie = res.data.movie_results[0];
+    const results = res.data[`${endpoint}_results`];
+    if (results && results.length > 0) {
+      const media = results[0];
       return {
-        title: movie.title,
-        originalTitle: movie.original_title,
-        year: (movie.release_date || '').slice(0, 4)
+        title: media.title || media.name,
+        originalTitle: media.original_title || media.original_name,
+        year: (media.release_date || media.first_air_date || '').slice(0, 4)
       };
     }
   } catch (err) {
-    console.error(`[NetCine] Erro TMDB (${imdbId}):`, err.message);
+    console.error(`[NetCine] Erro TMDB (${id}):`, err.message);
   }
   return null;
 }
@@ -124,16 +128,11 @@ function base32ToHex(b32) {
 function normalizeMagnet(raw) {
   const href = (raw || '').trim();
   const m = href.match(/xt=urn:btih:([A-Za-z0-9]+)/i);
-  if (!m) {
-    return null;
-  }
+  if (!m) return null;
 
   let hash = m[1];
   if (/^[A-Za-z2-7]{32}$/.test(hash)) hash = base32ToHex(hash);
-
-  if (!/^([a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/.test(hash)) {
-    return null;
-  }
+  if (!/^([a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/.test(hash)) return null;
   hash = hash.toLowerCase();
 
   let dn = '';
@@ -171,7 +170,6 @@ function formatBytes(bytes) {
 
 function parseInfo(dn, context, xl, postAudio) {
   const all = `${dn} ${context}`;
-
   const audio = detectAudio(dn) || detectAudio(context) || postAudio || { rank: 3, label: '🔊 Áudio não informado' };
 
   let res = (all.match(/\b(2160p|4k|1440p|1080p|720p|480p)\b/i) || [])[1] || '';
@@ -216,7 +214,6 @@ function makeItem(rawMagnet, context, postAudio, siteName, requireDnDual = false
   const dn = clean(safeDecode((magnetUrl.match(/[?&]dn=([^&]+)/) || [])[1] || ''));
   const xl = ((rawMagnet || '').match(/[?&](?:amp;)?xl=(\d+)/) || [])[1];
 
-  // Descarta legendado e áudio não informado (Dual x Dublado é decidido pela configuração)
   if (requireDnDual) {
     const a = detectAudio(dn);
     if (!a || a.rank > 1) return null;
@@ -257,7 +254,7 @@ function nearestHeading($, $a) {
 }
 
 // =====================================================================
-// FONTE 1: starckfilmes-v24.com
+// FONTE 1: Starck Filmes
 // =====================================================================
 
 const STARCK_NAME = 'Starck Filmes';
@@ -272,7 +269,6 @@ async function searchStarck(queryTitle) {
   try {
     const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS });
     const $ = cheerio.load(html);
-
     const byUrl = new Map();
 
     $('a[href*="/catalog/"]').each((_, elem) => {
@@ -345,9 +341,7 @@ async function extractStarckMagnets(postUrl) {
     const $ = cheerio.load(html);
 
     const postAudio = detectAudio(clean($('h1').first().text()));
-    if (postAudio && postAudio.rank === 2) {
-      return [];
-    }
+    if (postAudio && postAudio.rank === 2) return [];
 
     $('a[href^="magnet:"]').each((_, elem) => {
       const $a = $(elem);
@@ -381,7 +375,7 @@ async function getFromStarck(titles, meta) {
 }
 
 // =====================================================================
-// FONTE 2: starckfilmesnet.com
+// FONTE 2: StarckFilmesNet
 // =====================================================================
 
 const STARCKNET_NAME = 'StarckFilmesNet';
@@ -450,8 +444,7 @@ function parseStarckNetPost(html, imdbId) {
     });
   });
 
-  if (items.length === 0 && $('.o-lista').length === 0) {
-    $('a[href^="magnet:"]').each((_, a) => {
+  if (items.length === 0 && $('.o-lista').length === 0) {$('a[href^="magnet:"]').each((_, a) => {
       const context = clean($(a).parent().text());
       add(makeItem($(a).attr('href'), context, null, STARCKNET_NAME));
     });
@@ -512,7 +505,6 @@ async function searchComando(queryTitle) {
   try {
     const { data: html } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS, httpsAgent: comandoAgent });
     const $ = cheerio.load(html);
-
     const byUrl = new Map();
 
     $('article a[href], .post-title a[href], .entry-title a[href], h2 a[href]').each((_, elem) => {
@@ -521,8 +513,8 @@ async function searchComando(queryTitle) {
       if (href.startsWith('/')) href = COMANDO_URL + href;
       if (!href.startsWith(COMANDO_URL) || href.includes('/?s=')) return;
 
-      const $item = $(elem).closest('article, .post, .entry');
-      const title = clean($(elem).text() || $item.find('h2, .entry-title').text());
+      const $item =$(elem).closest('article, .post, .entry');
+      const title = clean($(elem).text() \vert{}\vert{}$item.find('h2, .entry-title').text());
       const metaText = clean($item.text());
 
       if (!byUrl.has(href)) {
@@ -573,7 +565,7 @@ async function extractComandoMagnets(postUrl, imdbId) {
     }
 
     const $ = cheerio.load(html);
-    const postAudio = detectAudio(clean($('h1').text() + ' ' + $('title').text()));
+    const postAudio = detectAudio(clean($('h1').text() + ' ' +$('title').text()));
     if (postAudio && postAudio.rank === 2) {
       console.log(`[Comando] Post legendado ignorado: ${postUrl}`);
       return [];
@@ -583,8 +575,8 @@ async function extractComandoMagnets(postUrl, imdbId) {
     const seen = new Set();
 
     $('a[href^="magnet:"]').each((_, elem) => {
-      const $a = $(elem);
-      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
+      const $a =$(elem);
+      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
 
       const item = makeItem($a.attr('href'), context, postAudio, COMANDO_NAME, true);
       if (!item || seen.has(item.hash)) return;
@@ -616,12 +608,95 @@ async function getFromComando(titles, meta, imdbId) {
 }
 
 // =====================================================================
+// FONTE 4: Flecha.lat (Filmes e Séries - HLS .m3u8 + OCR)
+// =====================================================================
+
+const FLECHA_NAME = 'Flecha Stream';
+
+async function extractFlechaStream(targetUrl) {
+  let browser;
+  let m3u8Url = null;
+
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+
+    page.on('request', (request) => {
+      const url = request.url();
+      if (url.includes('.m3u8') && !m3u8Url) {
+        m3u8Url = url;
+        console.log('[Flecha] Link .m3u8 capturado:', m3u8Url);
+      }
+    });
+
+    console.log(`[Flecha] Acessando: ${targetUrl}`);
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+
+    const captchaInput = page.locator('input[placeholder="Código"]');
+    if (await captchaInput.isVisible({ timeout: 5000 }).catch(() => false)) {
+      console.log('[Flecha] CAPTCHA detectado. Resolvendo via OCR...');
+      const captchaImg = page.locator('div:has(> input[placeholder="Código"]) img, form img').first();
+
+      if (await captchaImg.isVisible()) {
+        const imgBuffer = await captchaImg.screenshot();
+        const { data: { text } } = await Tesseract.recognize(imgBuffer, 'eng');
+        const codeText = text.replace(/[^a-zA-Z0-9]/g, '').trim();
+
+        console.log(`[Flecha] Código reconhecido: "${codeText}"`);
+        if (codeText) {
+          await captchaInput.fill(codeText);
+          const validateBtn = page.locator('button:has-text("Validar"), input[value="Validar"]').first();
+          await validateBtn.click();
+          await page.waitForTimeout(4000);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Flecha] Erro na extração:', err.message);
+  } finally {
+    if (browser) await browser.close();
+  }
+
+  return m3u8Url;
+}
+
+async function getFromFlecha(titles, meta, id) {
+  const slug = slugify(titles[0]);
+  const targetUrl = `${FLECHA_URL}/${slug}`;
+  const m3u8 = await extractFlechaStream(targetUrl);
+
+  if (!m3u8) return [];
+
+  return [{
+    hash: `flecha_${id}`,
+    source: FLECHA_NAME,
+    sizeBytes: 0,
+    res: 'HD',
+    audioRank: 0,
+    resRank: 2,
+    stream: {
+      name: `${meta.title} | HD`,
+      title: `🎬 Flecha Stream\n🌐 HLS Direct Stream`,
+      url: m3u8,
+      behaviorHints: {
+        notSupported: false,
+        requestHeaders: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': `${FLECHA_URL}/`
+        }
+      }
+    }
+  }];
+}
+
+// =====================================================================
 // Verificação de seeds (scrape UDP nos trackers)
 // =====================================================================
 
-// SCRAPE_START
-const SEED_CHECK = process.env.SEED_CHECK !== 'false';   // SEED_CHECK=false desliga
-const HIDE_DEAD = process.env.HIDE_DEAD !== 'false';    // links com 0 seeds são escondidos (HIDE_DEAD=false mostra)
+const SEED_CHECK = process.env.SEED_CHECK !== 'false';
+const HIDE_DEAD = process.env.HIDE_DEAD !== 'false';
 const SCRAPE_TIMEOUT = 3000;
 
 const DEFAULT_TRACKERS = [
@@ -688,7 +763,6 @@ function udpScrape(trackerUrl, hashHex, timeoutMs = SCRAPE_TIMEOUT) {
       }
     });
 
-    // connect request: protocol_id (0x41727101980) + action 0 + transaction_id
     const connReq = Buffer.alloc(16);
     connReq.writeUInt32BE(0x417, 0);
     connReq.writeUInt32BE(0x27101980, 4);
@@ -701,7 +775,6 @@ function udpScrape(trackerUrl, hashHex, timeoutMs = SCRAPE_TIMEOUT) {
 const seedCache = new Map();
 const SEED_CACHE_TTL = 10 * 60 * 1000;
 
-// Retorna o maior número de seeds encontrado, ou null se nenhum tracker respondeu
 async function getSeeders(hash, magnetUrl) {
   if (!hash || hash.length !== 40) return null;
 
@@ -718,19 +791,18 @@ async function getSeeders(hash, magnetUrl) {
   seedCache.set(hash, { seeds, at: Date.now() });
   return seeds;
 }
-// SCRAPE_END
 
 // =====================================================================
-// Fontes: cada uma vira um addon separado, com o nome da própria fonte
+// Configuração das Fontes
 // =====================================================================
 
 const SOURCES = [
   { key: 'starck', name: STARCK_NAME, fetch: (titles, meta) => getFromStarck(titles, meta) },
   { key: 'starcknet', name: STARCKNET_NAME, fetch: (titles, meta, imdbId) => getFromStarckNet(titles, meta, imdbId) },
-  { key: 'comando', name: COMANDO_NAME, fetch: (titles, meta, imdbId) => getFromComando(titles, meta, imdbId) }
+  { key: 'comando', name: COMANDO_NAME, fetch: (titles, meta, imdbId) => getFromComando(titles, meta, imdbId) },
+  { key: 'flecha', name: FLECHA_NAME, fetch: (titles, meta, imdbId) => getFromFlecha(titles, meta, imdbId) }
 ];
 
-// Canais de TV ao vivo (adicione outros nesta lista)
 const CANAIS_TV = [
   {
     id: 'live_axn',
@@ -743,14 +815,14 @@ const CANAIS_TV = [
 
 const DEFAULT_CONFIG = {
   sources: SOURCES.map((x) => x.key),
-  audio: 'dual',                      // 'dual' | 'dual+dub'
-  minRes: -1,                         // -1 todas | 1 = 720p+ | 2 = 1080p+ | 4 = só 4K
-  maxRes: -1,                         // -1 sem limite | 1 = até 720p | 2 = até 1080p
-  maxGB: 0,                           // 0 sem limite
-  minSeeds: HIDE_DEAD ? 1 : -1,       // -1 mostra todos (inclusive 0 seeds)
-  sort: 'res',                        // 'res' | 'seeds' | 'size'
-  limit: 0,                           // links por fonte (0 = todos)
-  showFile: true                      // mostra o nome do arquivo no card
+  audio: 'dual',
+  minRes: -1,
+  maxRes: -1,
+  maxGB: 0,
+  minSeeds: HIDE_DEAD ? 1 : -1,
+  sort: 'res',
+  limit: 0,
+  showFile: true
 };
 
 function parseConfig(b64) {
@@ -779,12 +851,15 @@ function parseConfig(b64) {
   }
 }
 
-// Addon único: junta as fontes escolhidas (manifest na raiz)
 const ALL_SOURCE = {
   key: 'all',
   name: 'Victor / NetStream',
-  fetch: async (titles, meta, imdbId, cfg = DEFAULT_CONFIG) => {
-    const active = SOURCES.filter((x) => cfg.sources.includes(x.key));
+  fetch: async (titles, meta, imdbId, cfg = DEFAULT_CONFIG, mediaType = 'movie') => {
+    // Se for série, força unicamente a fonte 'flecha'
+    const active = mediaType === 'series'
+      ? SOURCES.filter((x) => x.key === 'flecha')
+      : SOURCES.filter((x) => cfg.sources.includes(x.key));
+
     const lists = await Promise.all(active.map((x) => x.fetch(titles, meta, imdbId).catch(() => [])));
     return lists.flat();
   }
@@ -793,20 +868,19 @@ const ALL_SOURCE = {
 function buildManifest(src) {
   const manifest = {
     id: src.key === 'all' ? 'org.netcine.addon' : `org.netcine.${src.key}`,
-    version: '2.2.0',
+    version: '2.3.0',
     name: src.name,
     description: `Links magnet de filmes em Dual Áudio (${src.name})`,
     resources: ['stream'],
-    types: ['movie'],
+    types: ['movie', 'series'],
     idPrefixes: ['tt'],
     catalogs: [],
     behaviorHints: { configurable: true }
   };
-  // Só o addon principal (raiz) traz a TV ao vivo
   if (src.key === 'all') {
-    manifest.description = 'Filmes em Dual Áudio e canais de TV ao vivo';
+    manifest.description = 'Filmes, séries e canais de TV ao vivo';
     manifest.resources = ['catalog', 'meta', 'stream'];
-    manifest.types = ['movie', 'tv'];
+    manifest.types = ['movie', 'series', 'tv'];
     manifest.idPrefixes = ['tt', 'live_'];
     manifest.catalogs = [{ type: 'tv', id: 'tv_ao_vivo', name: 'TV Ao Vivo' }];
   }
@@ -816,30 +890,30 @@ function buildManifest(src) {
 const manifests = {};
 for (const src of [...SOURCES, ALL_SOURCE]) manifests[src.key] = buildManifest(src);
 
-// Cache do TMDB (os 3 addons pedem o mesmo filme ao mesmo tempo)
 const metaCache = new Map();
-function getMeta(imdbId) {
-  const c = metaCache.get(imdbId);
+function getMeta(imdbId, type = 'movie') {
+  const key = `${type}:${imdbId}`;
+  const c = metaCache.get(key);
   if (c && Date.now() - c.at < 60 * 60 * 1000) return c.promise;
-  const promise = getTmdbMovie(imdbId);
-  metaCache.set(imdbId, { promise, at: Date.now() });
-  promise.then((m) => { if (!m) metaCache.delete(imdbId); });
+  const promise = getTmdbMedia(imdbId, type);
+  metaCache.set(key, { promise, at: Date.now() });
+  promise.then((m) => { if (!m) metaCache.delete(key); });
   return promise;
 }
 
 const resultCache = new Map();
 const RESULT_CACHE_TTL = 10 * 60 * 1000;
 
-async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
-  console.log(`[${src.name}] Solicitação de stream para ${imdbId}`);
+async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG, mediaType = 'movie') {
+  console.log(`[${src.name}] Solicitação de stream (${mediaType}) para ${imdbId}`);
 
-  const cacheKey = `${src.key}:${imdbId}:${JSON.stringify(cfg)}`;
+  const cacheKey = `${src.key}:${mediaType}:${imdbId}:${JSON.stringify(cfg)}`;
   const cached = resultCache.get(cacheKey);
   if (cached && Date.now() - cached.at < RESULT_CACHE_TTL) return cached.data;
 
-  const meta = await getMeta(imdbId);
+  const meta = await getMeta(imdbId, mediaType);
   if (!meta) {
-    console.log(`[${src.name}] Filme não encontrado no TMDB para o ID: ${imdbId}`);
+    console.log(`[${src.name}] Mídia não encontrada no TMDB para o ID: ${imdbId}`);
     return { streams: [] };
   }
 
@@ -847,12 +921,11 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
 
   let items = [];
   try {
-    items = await src.fetch(titles, meta, imdbId, cfg);
+    items = await src.fetch(titles, meta, imdbId, cfg, mediaType);
   } catch (err) {
     console.error(`[${src.name}] Erro inesperado:`, err.message);
   }
 
-  // Remover duplicados por hash
   let unique = [];
   const seenHashes = new Set();
   for (const item of items) {
@@ -862,22 +935,26 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
     }
   }
 
-  // Filtros da configuração: tipo de áudio e qualidade mínima
-  unique = unique.filter((i) => (cfg.audio === 'dual' ? i.audioRank === 0 : i.audioRank <= 1));
-  if (cfg.minRes >= 0) unique = unique.filter((i) => i.resRank >= cfg.minRes);
-  if (cfg.maxRes >= 0) unique = unique.filter((i) => i.resRank <= cfg.maxRes);
-  if (cfg.maxGB > 0) unique = unique.filter((i) => !i.sizeBytes || i.sizeBytes <= cfg.maxGB * 1024 ** 3);
+  // Filtros aplicados apenas para torrents (ignora streams HLS do Flecha)
+  unique = unique.filter((i) => {
+    if (i.source === FLECHA_NAME) return true;
+    if (cfg.audio === 'dual' && i.audioRank !== 0) return false;
+    if (cfg.minRes >= 0 && i.resRank < cfg.minRes) return false;
+    if (cfg.maxRes >= 0 && i.resRank > cfg.maxRes) return false;
+    if (cfg.maxGB > 0 && i.sizeBytes && i.sizeBytes > cfg.maxGB * 1024 ** 3) return false;
+    return true;
+  });
 
-  // Verifica seeds em paralelo e marca no título de cada link
   if (SEED_CHECK) {
     await Promise.all(unique.map(async (item) => {
+      if (item.source === FLECHA_NAME) return;
       try {
         item.seeds = await getSeeders(item.hash, item.stream.externalUrl);
       } catch (e) {
         item.seeds = null;
       }
       const lines = item.stream.title.split('\n');
-      if (item.seeds === 0) lines[0] += '  ·  ⚠️ 0 seeds';
+      if (item.seeds === 0) lines[0] += '  ·  ⚠ 0 seeds';
       else if (item.seeds > 0) lines[0] += `  ·  🌱 ${item.seeds} seeds`;
       item.stream.title = lines.join('\n');
     }));
@@ -885,10 +962,9 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
 
   let finalItems = unique;
   if (SEED_CHECK && cfg.minSeeds > 0) {
-    finalItems = unique.filter((i) => i.seeds === null || i.seeds === undefined || i.seeds >= cfg.minSeeds);
+    finalItems = unique.filter((i) => i.source === FLECHA_NAME || i.seeds === null || i.seeds === undefined || i.seeds >= cfg.minSeeds);
   }
 
-  // Ordenar: agrupa por fonte; dentro dela, sem seeds por último, áudio e critério escolhido
   const SOURCE_ORDER = SOURCES.map((x) => x.name);
   const sourceRank = (i) => {
     const idx = SOURCE_ORDER.indexOf(i.source);
@@ -915,10 +991,9 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
     });
   }
 
-  // Nome em negrito: Título do filme em PT-BR | qualidade
   const streams = finalItems.map((item) => {
     const out = { ...item.stream, name: `${meta.title}${item.res ? ' | ' + item.res : ''}` };
-    if (!cfg.showFile) out.title = out.title.split('\n').filter((l) => !l.startsWith('📄')).join('\n');
+    if (!cfg.showFile && out.title) out.title = out.title.split('\n').filter((l) => !l.startsWith('📄')).join('\n');
     return out;
   });
 
@@ -930,7 +1005,7 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
 }
 
 // =====================================================================
-// Servidor HTTP (protocolo de addon do Stremio / Nuvio)
+// Servidor HTTP
 // =====================================================================
 
 const CORS_HEADERS = {
@@ -942,10 +1017,6 @@ const CORS_HEADERS = {
 function sendJson(res, status, obj) {
   res.writeHead(status, { ...CORS_HEADERS, 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
-}
-
-function esc(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 const LANDING_HTML = String.raw`<!doctype html>
@@ -988,18 +1059,18 @@ ol{margin:0;padding-left:20px;color:var(--mut);font-size:13px}
 </style></head><body><main>
 <div class="hd">
 <svg class="logo" viewBox="0 0 48 48" aria-hidden="true"><rect width="48" height="48" rx="12" fill="#e5b53a"/><path d="M18 13l17 11-17 11z" fill="#1a1400"/><path d="M9 20c2 2 2 6 0 8" stroke="#1a1400" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
-<div><h1>Victor / NetStream</h1><p class="sub">Filmes em Dual Áudio direto no seu app</p></div>
+<div><h1>Victor / NetStream</h1><p class="sub">Filmes, Séries e TV ao vivo</p></div>
 </div>
-<div class="tags"><span>Dual Áudio</span><span>PT-BR</span><span>Checa seeds</span><span>3 fontes</span></div>
+<div class="tags"><span>Dual Áudio</span><span>PT-BR</span><span>Checa seeds</span><span>4 fontes</span></div>
 <div id="app"></div>
 <a id="install" class="btn pri" href="#">Instalar</a>
 <button id="copy" class="btn gh" type="button">Copiar link</button>
 <code id="url"></code>
 <div class="cd" style="margin-top:18px"><div class="lb">Como instalar</div>
-<ol><li>Toque em Instalar, ou copie o link.</li><li>No app, abra Addons e cole o link.</li><li>Abra um filme e escolha o link na lista.</li></ol></div>
+<ol><li>Toque em Instalar, ou copie o link.</li><li>No app, abra Addons e cole o link.</li><li>Escolha o filme ou série desejado.</li></ol></div>
 </main>
 <script>
-var SRC = [['starck', 'Starck Filmes', 'S', '#3b82f6'], ['starcknet', 'StarckFilmesNet', 'SN', '#8b5cf6'], ['comando', 'Comando Torrents', 'C', '#ef4444']];
+var SRC = [['starck', 'Starck Filmes', 'S', '#3b82f6'], ['starcknet', 'StarckFilmesNet', 'SN', '#8b5cf6'], ['comando', 'Comando Torrents', 'C', '#ef4444'], ['flecha', 'Flecha Stream', 'F', '#10b981']];
 var OPT = {
   audio: ['Tipo de áudio', [['dual', 'Só Dual Áudio'], ['dual+dub', 'Dual + Dublado']]],
   minRes: ['Qualidade mínima', [[-1, 'Todas'], [1, '720p'], [2, '1080p'], [4, '4K']]],
@@ -1010,7 +1081,7 @@ var OPT = {
   limit: ['Links por fonte', [[0, 'Todos'], [3, '3'], [5, '5'], [10, '10']]]
 };
 var GRP = [['Áudio', ['audio']], ['Qualidade', ['minRes', 'maxRes']], ['Filtros', ['maxGB', 'minSeeds']], ['Organização', ['sort', 'limit']]];
-var st = { sources: ['starck', 'starcknet', 'comando'], audio: 'dual', minRes: -1, maxRes: -1, maxGB: 0, minSeeds: 1, sort: 'res', limit: 0, showFile: true };
+var st = { sources: ['starck', 'starcknet', 'comando', 'flecha'], audio: 'dual', minRes: -1, maxRes: -1, maxGB: 0, minSeeds: 1, sort: 'res', limit: 0, showFile: true };
 function render() {
   var h = '<div class="cd"><div class="lb">Fontes</div>';
   SRC.forEach(function (s) {
@@ -1116,13 +1187,15 @@ const server = http.createServer(async (req, res) => {
     if (sm) {
       const type = decodeURIComponent(sm[1]);
       const id = decodeURIComponent(sm[2]);
+
       if (type === 'tv' && src.key === 'all') {
         const ch = CANAIS_TV.find((c) => c.id === id);
         const streams = ch ? [{ title: `📺 ${ch.name}\n🌐 Transmissão Ao Vivo (HD)`, externalUrl: ch.streamUrl }] : [];
         return sendJson(res, 200, { streams });
       }
-      if (type !== 'movie') return sendJson(res, 200, { streams: [] });
-      return sendJson(res, 200, await handleStream(src, id, cfg));
+
+      if (type !== 'movie' && type !== 'series') return sendJson(res, 200, { streams: [] });
+      return sendJson(res, 200, await handleStream(src, id, cfg, type));
     }
 
     return sendJson(res, 404, { error: 'Not found' });
