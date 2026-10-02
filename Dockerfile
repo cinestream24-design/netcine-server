@@ -1,10 +1,10 @@
-FROM mcr.microsoft.com/playwright/node:v1.48.0-noble
+FROM mcr.microsoft.com/playwright:v1.48.0-noble
 
 WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm ci
+RUN npm install --omit=dev
 
 COPY . .
 
