@@ -5,8 +5,6 @@ const dns = require('dns');
 const https = require('https');
 const dgram = require('dgram');
 const crypto = require('crypto');
-const { chromium } = require('playwright');
-const Tesseract = require('tesseract.js');
 
 // DNS da Cloudflare usado SOMENTE nas requisições do Comando Torrents
 const cfResolver = new dns.Resolver();
@@ -444,7 +442,9 @@ function parseStarckNetPost(html, imdbId) {
     });
   });
 
-  if (items.length === 0 && $('.o-lista').length === 0) {$('a[href^="magnet:"]').each((_, a) => {
+  // Plano B: se o layout mudar, pega qualquer magnet da página
+  if (items.length === 0 && $('.o-lista').length === 0) {
+    $('a[href^="magnet:"]').each((_, a) => {
       const context = clean($(a).parent().text());
       add(makeItem($(a).attr('href'), context, null, STARCKNET_NAME));
     });
@@ -513,8 +513,8 @@ async function searchComando(queryTitle) {
       if (href.startsWith('/')) href = COMANDO_URL + href;
       if (!href.startsWith(COMANDO_URL) || href.includes('/?s=')) return;
 
-      const $item =$(elem).closest('article, .post, .entry');
-      const title = clean($(elem).text() \vert{}\vert{}$item.find('h2, .entry-title').text());
+      const $item = $(elem).closest('article, .post, .entry');
+      const title = clean($(elem).text() || $item.find('h2, .entry-title').text());
       const metaText = clean($item.text());
 
       if (!byUrl.has(href)) {
@@ -565,7 +565,7 @@ async function extractComandoMagnets(postUrl, imdbId) {
     }
 
     const $ = cheerio.load(html);
-    const postAudio = detectAudio(clean($('h1').text() + ' ' +$('title').text()));
+    const postAudio = detectAudio(clean($('h1').text() + ' ' + $('title').text()));
     if (postAudio && postAudio.rank === 2) {
       console.log(`[Comando] Post legendado ignorado: ${postUrl}`);
       return [];
@@ -575,8 +575,8 @@ async function extractComandoMagnets(postUrl, imdbId) {
     const seen = new Set();
 
     $('a[href^="magnet:"]').each((_, elem) => {
-      const $a =$(elem);
-      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
+      const $a = $(elem);
+      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
 
       const item = makeItem($a.attr('href'), context, postAudio, COMANDO_NAME, true);
       if (!item || seen.has(item.hash)) return;
@@ -614,11 +614,22 @@ async function getFromComando(titles, meta, imdbId) {
 const FLECHA_NAME = 'Flecha Stream';
 
 async function extractFlechaStream(targetUrl) {
+  // playwright e tesseract.js são carregados só aqui: se não estiverem instalados, o servidor continua funcionando
+  let chromium;
+  let Tesseract;
+  try {
+    ({ chromium } = require('playwright'));
+    Tesseract = require('tesseract.js');
+  } catch (err) {
+    console.error('[Flecha] playwright/tesseract.js não instalados, fonte ignorada:', err.message);
+    return null;
+  }
+
   let browser;
   let m3u8Url = null;
 
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const page = await browser.newPage({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
@@ -656,7 +667,7 @@ async function extractFlechaStream(targetUrl) {
   } catch (err) {
     console.error('[Flecha] Erro na extração:', err.message);
   } finally {
-    if (browser) await browser.close();
+    if (browser) await browser.close().catch(() => {});
   }
 
   return m3u8Url;
@@ -904,10 +915,12 @@ function getMeta(imdbId, type = 'movie') {
 const resultCache = new Map();
 const RESULT_CACHE_TTL = 10 * 60 * 1000;
 
-async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG, mediaType = 'movie') {
-  console.log(`[${src.name}] Solicitação de stream (${mediaType}) para ${imdbId}`);
+async function handleStream(src, rawId, cfg = DEFAULT_CONFIG, mediaType = 'movie') {
+  // Séries chegam como "tt1234567:temporada:episódio": o TMDB só entende a parte do IMDb
+  const imdbId = rawId.split(':')[0];
+  console.log(`[${src.name}] Solicitação de stream (${mediaType}) para ${rawId}`);
 
-  const cacheKey = `${src.key}:${mediaType}:${imdbId}:${JSON.stringify(cfg)}`;
+  const cacheKey = `${src.key}:${mediaType}:${rawId}:${JSON.stringify(cfg)}`;
   const cached = resultCache.get(cacheKey);
   if (cached && Date.now() - cached.at < RESULT_CACHE_TTL) return cached.data;
 
@@ -997,7 +1010,7 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG, mediaType = 'movi
     return out;
   });
 
-  console.log(`[${src.name}] Retornando ${streams.length} streams para ${imdbId}`);
+  console.log(`[${src.name}] Retornando ${streams.length} streams para ${rawId}`);
 
   const data = { streams };
   if (streams.length > 0) resultCache.set(cacheKey, { data, at: Date.now() });
@@ -1209,4 +1222,12 @@ const PORT = process.env.PORT || 7000;
 
 server.listen(PORT, () => {
   console.log(`[NetCine] Addons rodando na porta ${PORT}: ${SOURCES.map((s) => '/' + s.key).join(', ')}`);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[NetCine Erro Não Tratado]:', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[NetCine Rejeição Não Tratada]:', reason);
 });
