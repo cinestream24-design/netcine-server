@@ -4,7 +4,6 @@
   "description": "Addon Stremio/Nuvio - filmes em Dual Áudio",
   "main": "index.js",
   "scripts": {
-    "postinstall": "npx playwright install --with-deps chromium",
     "start": "node index.js"
   },
   "engines": {
