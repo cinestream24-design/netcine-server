@@ -1,4 +1,4 @@
-const http = require('http');
+Const http = require('http');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const dns = require('dns');
@@ -241,12 +241,12 @@ function makeItem(rawMagnet, context, postAudio, siteName, requireDnDual = false
   };
 }
 
-function nearestHeading($,$a) {
-  let $node =$a;
+function nearestHeading($, $a) {
+  let $node = $a;
   for (let i = 0; i < 4 && $node.length; i++) {
     const h = clean($node.prevAll('h2,h3,h4').first().text());
     if (h) return h;
-    $node =$node.parent();
+    $node = $node.parent();
   }
   return '';
 }
@@ -275,14 +275,14 @@ async function searchStarck(queryTitle) {
       if (href.startsWith('/')) href = STARCK_URL + href;
       if (!href.startsWith(STARCK_URL)) return;
 
-      const $item =$(elem).closest('.item, .sub-item, article, li');
+      const $item = $(elem).closest('.item, .sub-item, article, li');
       let audioType = clean($item.find('.footer-audio-type').first().text());
       if (!audioType) {
         const hrefs = new Set();
         $item.find('a[href*="/catalog/"]').each((__, a) => hrefs.add($(a).attr('href')));
         if (hrefs.size === 1) audioType = clean($item.text());
       }
-      const title = clean($(elem).attr('title') \vert{}\vert{}$(elem).text());
+      const title = clean($(elem).attr('title') || $(elem).text());
 
       const prev = byUrl.get(href);
       if (!prev) {
@@ -342,8 +342,8 @@ async function extractStarckMagnets(postUrl) {
     if (postAudio && postAudio.rank === 2) return [];
 
     $('a[href^="magnet:"]').each((_, elem) => {
-      const $a =$(elem);
-      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
+      const $a = $(elem);
+      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
 
       const item = makeItem($a.attr('href'), context, postAudio, STARCK_NAME);
       if (!item || seen.has(item.hash)) return;
@@ -429,7 +429,7 @@ function parseStarckNetPost(html, imdbId) {
     const groupAudio = detectAudio(groupName);
 
     $(group).find('.o-arquivo').each((__, file) => {
-      const $file =$(file);
+      const $file = $(file);
       const magnet = $file.find('a[href^="magnet:"]').first().attr('href');
       if (!magnet) return;
 
@@ -442,7 +442,9 @@ function parseStarckNetPost(html, imdbId) {
     });
   });
 
-  if (items.length === 0 && $('.o-lista').length === 0) {$('a[href^="magnet:"]').each((_, a) => {
+  // Plano B: se o layout mudar, pega qualquer magnet da página
+  if (items.length === 0 && $('.o-lista').length === 0) {
+    $('a[href^="magnet:"]').each((_, a) => {
       const context = clean($(a).parent().text());
       add(makeItem($(a).attr('href'), context, null, STARCKNET_NAME));
     });
@@ -511,8 +513,8 @@ async function searchComando(queryTitle) {
       if (href.startsWith('/')) href = COMANDO_URL + href;
       if (!href.startsWith(COMANDO_URL) || href.includes('/?s=')) return;
 
-      const $item =$(elem).closest('article, .post, .entry');
-      const title = clean($(elem).text() \vert{}\vert{}$item.find('h2, .entry-title').text());
+      const $item = $(elem).closest('article, .post, .entry');
+      const title = clean($(elem).text() || $item.find('h2, .entry-title').text());
       const metaText = clean($item.text());
 
       if (!byUrl.has(href)) {
@@ -563,7 +565,7 @@ async function extractComandoMagnets(postUrl, imdbId) {
     }
 
     const $ = cheerio.load(html);
-    const postAudio = detectAudio(clean($('h1').text() + ' ' +$('title').text()));
+    const postAudio = detectAudio(clean($('h1').text() + ' ' + $('title').text()));
     if (postAudio && postAudio.rank === 2) {
       console.log(`[Comando] Post legendado ignorado: ${postUrl}`);
       return [];
@@ -573,212 +575,7 @@ async function extractComandoMagnets(postUrl, imdbId) {
     const seen = new Set();
 
     $('a[href^="magnet:"]').each((_, elem) => {
-      const $a =$(elem);
-      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
+      const $a = $(elem);
+      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
 
-      const item = makeItem($a.attr('href'), context, postAudio, COMANDO_NAME);
-      if (!item || seen.has(item.hash)) return;
-      seen.add(item.hash);
-      items.push(item);
-    });
-
-    return items;
-  } catch (err) {
-    console.error(`[Comando] Erro ao extrair magnets:`, err.message);
-    return [];
-  }
-}
-
-async function getFromComando(titles, meta, imdbId) {
-  let candidates = [];
-  for (const t of titles) {
-    const posts = await searchComando(t);
-    candidates = pickComandoCandidates(posts, titles, meta.year);
-    if (candidates.length > 0) break;
-  }
-
-  for (const postUrl of candidates.slice(0, 3)) {
-    console.log(`[Comando] Testando post: ${postUrl}`);
-    const items = await extractComandoMagnets(postUrl, imdbId);
-    if (items.length > 0) return items;
-  }
-  return [];
-}
-
-// =====================================================================
-// FONTE 4: Flecha Stream (HLS Direct Links)
-// =====================================================================
-
-const FLECHA_NAME = 'Flecha Stream';
-
-async function searchFlecha(queryTitle) {
-  const term = (queryTitle || '').trim();
-  if (!term) return [];
-
-  const searchUrl = `${FLECHA_URL}/api/search?q=${encodeURIComponent(term)}`;
-  console.log(`[Flecha] Pesquisando: ${searchUrl}`);
-
-  try {
-    const { data } = await axios.get(searchUrl, { timeout: 10000, headers: HTTP_HEADERS });
-    if (!Array.isArray(data)) return [];
-    return data;
-  } catch (err) {
-    console.error(`[Flecha] Erro na busca HTTP:`, err.message);
-    return [];
-  }
-}
-
-async function getFromFlecha(titles, meta) {
-  const items = [];
-  try {
-    for (const t of titles) {
-      const results = await searchFlecha(t);
-      for (const res of results) {
-        if (!res || !res.stream_url) continue;
-
-        items.push({
-          source: FLECHA_NAME,
-          sizeBytes: 0,
-          res: res.quality || '1080p',
-          audioRank: 0,
-          resRank: RES_RANK[res.quality] !== undefined ? RES_RANK[res.quality] : 2,
-          stream: {
-            name: `${FLECHA_NAME} | ${res.quality || 'HD'}`,
-            title: `🔊 Dual Áudio / Dublado\n🎬 ${res.quality || '1080p'} HLS Direct Stream\n🌐 Flecha Stream`,
-            url: res.stream_url
-          }
-        });
-      }
-      if (items.length > 0) break;
-    }
-  } catch (err) {
-    console.error(`[Flecha] Erro ao extrair streams:`, err.message);
-  }
-  return items;
-}
-
-// =====================================================================
-// MANIPULADOR DE STREAM DO STREMIO / NUVIO
-// =====================================================================
-
-async function handleStream(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Content-Type', 'application/json');
-
-  const { type, id } = req.params;
-  const showFileParam = req.query.showFile;
-  const cfg = { showFile: showFileParam !== 'false' };
-
-  // Suporte a episódios de séries (tt1234567:1:2)
-  const parts = (id || '').split(':');
-  const imdbId = parts[0];
-  const season = parts[1] ? parseInt(parts[1], 10) : null;
-  const episode = parts[2] ? parseInt(parts[2], 10) : null;
-
-  console.log(`\n[NetCine] --- Nova requisição: type=${type}, id=${id} ---`);
-
-  const meta = await getTmdbMedia(imdbId, type);
-  if (!meta) {
-    console.log(`[NetCine] TMDB não retornou dados para ${imdbId}`);
-    return res.json({ streams: [] });
-  }
-
-  const titles = [meta.title, meta.originalTitle].filter(Boolean);
-  console.log(`[NetCine] Buscando mídias para: ${titles.join(' / ')} (${meta.year})`);
-
-  let allItems = [];
-
-  // Busca em paralelo nas 4 fontes
-  const [starckItems, starckNetItems, comandoItems, flechaItems] = await Promise.all([
-    getFromStarck(titles, meta),
-    getFromStarckNet(titles, meta, imdbId),
-    getFromComando(titles, meta, imdbId),
-    getFromFlecha(titles, meta)
-  ]);
-
-  allItems = [
-    ...(starckItems || []),
-    ...(starckNetItems || []),
-    ...(comandoItems || []),
-    ...(flechaItems || [])
-  ];
-
-  // Filtra itens inválidos
-  const finalItems = allItems.filter((item) => item && item.stream);
-
-  // Ordena por rank de áudio e resolução
-  finalItems.sort((a, b) => {
-    if (a.audioRank !== b.audioRank) return a.audioRank - b.audioRank;
-    return b.resRank - a.resRank;
-  });
-
-  // CORREÇÃO CRÍTICA APLICADA AQUI:
-  // Preserva os atributos do stream sem sobrescrever 'name' e mantendo 'url' para o Flecha Stream
-  const streams = finalItems.map((item) => {
-    const out = { ...item.stream };
-
-    if (item.source === FLECHA_NAME) {
-      out.name = item.stream.name || `${FLECHA_NAME} | HD`;
-    } else {
-      out.name = `${meta.title}${item.res ? ' | ' + item.res : ''}`;
-    }
-
-    if (!cfg.showFile && out.title) {
-      out.title = out.title.split('\n').filter((l) => !l.startsWith('📄')).join('\n');
-    }
-
-    return out;
-  });
-
-  console.log(`[NetCine] Retornando ${streams.length} streams para o Stremio.`);
-  return res.json({ streams });
-}
-
-// =====================================================================
-// SERVIDOR HTTP NATIVO / MANIFEST
-// =====================================================================
-
-const manifest = {
-  id: 'com.netcine.server.addon',
-  version: '2.2.0',
-  name: 'NetCine Stream',
-  description: 'Addon Stremio/Nuvio - Filmes e Séries Dual Áudio',
-  resources: ['stream'],
-  types: ['movie', 'series'],
-  idPrefixes: ['tt'],
-  catalogs: []
-};
-
-const server = http.createServer((req, res) => {
-  const urlParts = req.url.split('?');
-  const path = urlParts[0];
-
-  if (path === '/' || path === '/manifest.json') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'application/json');
-    return res.end(JSON.stringify(manifest));
-  }
-
-  const streamMatch = path.match(/^\/stream\/(movie|series)\/([^/]+)\.json$/);
-  if (streamMatch) {
-    req.params = { type: streamMatch[1], id: streamMatch[2] };
-    req.query = {};
-    if (urlParts[1]) {
-      const qParams = new URLSearchParams(urlParts[1]);
-      for (const [k, v] of qParams) req.query[k] = v;
-    }
-    return handleStream(req, res);
-  }
-
-  res.statusCode = 404;
-  res.end('Not Found');
-});
-
-const PORT = process.env.PORT || 7000;
-server.listen(PORT, () => {
-  console.log(`\n==================================================`);
-  console.log(` NetCine Server (v2.2.0) rodando na porta ${PORT}`);
-  console.log(` Manifest disponível em: http://localhost:${PORT}/manifest.json`);
-  console.log(`==================================================\n`);
-});
+      const item = makeItem($a.attr('href'), context, postAud
