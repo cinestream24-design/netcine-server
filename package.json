@@ -12,7 +12,7 @@
   "dependencies": {
     "axios": "^1.7.0",
     "cheerio": "1.0.0-rc.12",
-    "playwright": "^1.48.0",
+    "playwright": "1.48.0",
     "tesseract.js": "^5.1.1"
   }
 }
