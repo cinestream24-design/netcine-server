@@ -2,6 +2,7 @@ const express = require("express");
 const { chromium } = require("playwright");
 
 const app = express();
+
 const PORT = process.env.PORT || 3000;
 
 const API_BASE = "https://api.reidoscanais.st";
@@ -9,14 +10,12 @@ const API_REFERER = "https://reidoscanais.st/";
 
 let browser = null;
 
-async function getBrowser() {
-  if (browser) {
-    try {
-      if (browser.isConnected()) return browser;
-    } catch {}
-  }
+// =====================================================
+// BROWSER
+// =====================================================
 
-  console.log("[BROWSER] Iniciando Chromium...");
+async function getBrowser() {
+  if (browser) return browser;
 
   browser = await chromium.launch({
     headless: true,
@@ -26,170 +25,157 @@ async function getBrowser() {
       "--disable-dev-shm-usage",
       "--disable-gpu",
       "--no-first-run",
-      "--no-zygote",
-      "--single-process"
+      "--no-zygote"
     ]
   });
 
   return browser;
 }
 
-function isHls(url) {
-  if (!url) return false;
+// =====================================================
+// API
+// =====================================================
 
-  const value = url.toLowerCase();
+async function getChannels() {
+  const response = await fetch(`${API_BASE}/channels`, {
+    headers: {
+      "Referer": API_REFERER,
+      "Origin": "https://reidoscanais.st",
+      "User-Agent":
+        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36",
+      "Accept": "application/json,text/plain,*/*"
+    }
+  });
 
-  return (
-    value.includes(".m3u8") ||
-    value.includes("application/vnd.apple.mpegurl") ||
-    value.includes("application/x-mpegurl") ||
-    value.includes("mpegurl")
+  if (!response.ok) {
+    throw new Error(
+      `API channels respondeu HTTP ${response.status}`
+    );
+  }
+
+  const data = await response.json();
+
+  console.log(
+    "API channels:",
+    Array.isArray(data)
+      ? `array com ${data.length} itens`
+      : `objeto com chaves: ${Object.keys(data || {}).join(", ")}`
   );
+
+  // A API pode retornar diretamente um array
+  if (Array.isArray(data)) {
+    return data;
+  }
+
+  // Ou pode retornar os canais dentro de alguma propriedade
+  if (Array.isArray(data.channels)) {
+    return data.channels;
+  }
+
+  if (Array.isArray(data.data)) {
+    return data.data;
+  }
+
+  if (Array.isArray(data.results)) {
+    return data.results;
+  }
+
+  return [];
 }
 
+// =====================================================
+// RESOLVER HLS
+// =====================================================
+
 async function resolveHLS(pageUrl) {
-  console.log(`[RESOLVE] Abrindo player: ${pageUrl}`);
+  const b = await getBrowser();
 
-  const browser = await getBrowser();
-
-  const context = await browser.newContext({
+  const context = await b.newContext({
     userAgent:
-      "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
+      "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
 
     extraHTTPHeaders: {
-      Referer: API_REFERER
-    },
-
-    viewport: {
-      width: 1280,
-      height: 720
+      Referer: "https://reidoscanais.st/"
     }
   });
 
   const page = await context.newPage();
 
-  const found = new Set();
+  let found = null;
 
-  function capture(url, source) {
+  function checkUrl(url) {
     if (!url) return;
 
-    if (isHls(url)) {
-      if (!found.has(url)) {
-        found.add(url);
-        console.log(`[HLS] Encontrado via ${source}: ${url}`);
+    if (
+      url.includes(".m3u8") ||
+      url.includes("m3u8?")
+    ) {
+      if (!found) {
+        found = url;
+        console.log("HLS ENCONTRADO:", url);
       }
     }
   }
 
-  // Captura requisições normais
   page.on("request", request => {
-    capture(request.url(), "request");
+    checkUrl(request.url());
   });
 
-  // Captura respostas
   page.on("response", response => {
-    const url = response.url();
+    checkUrl(response.url());
 
-    capture(url, "response");
-
-    const contentType =
-      response.headers()["content-type"] || "";
+    const type = response.headers()["content-type"] || "";
 
     if (
-      contentType.includes("mpegurl") ||
-      contentType.includes("application/vnd.apple.mpegurl")
+      type.includes("mpegurl") ||
+      type.includes("x-mpegurl")
     ) {
-      capture(url, "content-type");
+      checkUrl(response.url());
     }
   });
 
-  // Intercepta possíveis URLs colocadas pelo player
   page.on("console", msg => {
-    const text = msg.text();
-
-    if (text.includes(".m3u8")) {
-      console.log("[PAGE] Console:", text);
-
-      const matches = text.match(
-        /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi
-      );
-
-      if (matches) {
-        for (const url of matches) {
-          capture(url, "console");
-        }
-      }
-    }
+    console.log("PAGE:", msg.text());
   });
 
   try {
+    console.log("Abrindo página:", pageUrl);
+
     await page.goto(pageUrl, {
       waitUntil: "domcontentloaded",
       timeout: 30000
     });
-  } catch (err) {
-    console.log("[PAGE] goto:", err.message);
-  }
 
-  console.log("[RESOLVE] Página carregada. Aguardando player...");
+    await page.waitForTimeout(15000);
 
-  // Dá tempo para JS, iframe e player carregarem
-  for (let i = 0; i < 20; i++) {
-    if (found.size > 0) break;
-
-    await page.waitForTimeout(1000);
-
-    // Procura também no HTML/DOM atual
-    try {
-      const html = await page.content();
-
-      const matches = html.match(
-        /https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/gi
-      );
-
-      if (matches) {
-        for (const url of matches) {
-          capture(url, "html");
-        }
-      }
-    } catch {}
-
-    // Procura dentro dos frames
+    // Verifica novamente todos os frames
     for (const frame of page.frames()) {
       try {
         const html = await frame.content();
 
-        const matches = html.match(
-          /https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/gi
+        const match = html.match(
+          /https?:\/\/[^"'\\\s]+\.m3u8[^"'\\\s]*/i
         );
 
-        if (matches) {
-          for (const url of matches) {
-            capture(url, "iframe");
-          }
+        if (match) {
+          found = match[0];
+          console.log("HLS encontrado no HTML:", found);
+          break;
         }
-      } catch {}
+      } catch (_) {}
     }
+  } catch (err) {
+    console.log("Erro ao abrir página:", err.message);
   }
-
-  const result = [...found][0] || null;
 
   await context.close();
 
-  if (result) {
-    console.log(`[RESOLVE] HLS FINAL: ${result}`);
-  } else {
-    console.log("[RESOLVE] Nenhum HLS encontrado.");
-  }
-
-  return result;
+  return found;
 }
 
-
-// ---------------------------------------------------------
+// =====================================================
 // HEALTH
-// ---------------------------------------------------------
+// =====================================================
 
 app.get("/health", (req, res) => {
   res.json({
@@ -198,15 +184,14 @@ app.get("/health", (req, res) => {
   });
 });
 
-
-// ---------------------------------------------------------
+// =====================================================
 // MANIFEST
-// ---------------------------------------------------------
+// =====================================================
 
-app.get("/manifest.json", async (req, res) => {
+app.get("/manifest.json", (req, res) => {
   res.json({
     id: "netcine.server",
-    version: "2.3.0",
+    version: "2.4.0",
     name: "NetCine",
     description: "Canais de TV ao vivo",
     logo: "https://cdn.reidoscanais.st/imagens/logo.png",
@@ -225,215 +210,259 @@ app.get("/manifest.json", async (req, res) => {
       {
         type: "tv",
         id: "netcine",
-        name: "NetCine",
-        extra: [
-          {
-            name: "search",
-            isRequired: false
-          }
-        ]
+        name: "NetCine"
       }
     ]
   });
 });
 
-
-// ---------------------------------------------------------
-// CATÁLOGO
-// ---------------------------------------------------------
+// =====================================================
+// CATALOG
+// =====================================================
 
 app.get("/catalog/tv/netcine.json", async (req, res) => {
   try {
-    const response = await fetch(`${API_BASE}/channels`, {
-      headers: {
-        Referer: API_REFERER
-      }
-    });
+    const channels = await getChannels();
 
-    if (!response.ok) {
-      throw new Error(`API respondeu ${response.status}`);
-    }
+    console.log(
+      `Montando catálogo com ${channels.length} canais`
+    );
 
-    const data = await response.json();
+    const metas = channels
+      .map((channel, index) => {
+        const id =
+          channel.id ??
+          channel.slug ??
+          channel.channel_id ??
+          channel.code ??
+          `channel-${index}`;
 
-    const channels = Array.isArray(data)
-      ? data
-      : data.channels || data.results || [];
+        const name =
+          channel.name ??
+          channel.title ??
+          channel.nome ??
+          `Canal ${index + 1}`;
 
-    const metas = channels.map(channel => ({
-      id: String(
-        channel.id ||
-        channel.slug ||
-        channel.name
-      ),
+        const logo =
+          channel.logo_url ??
+          channel.logo ??
+          channel.image ??
+          channel.poster ??
+          "";
 
-      type: "tv",
+        return {
+          id: String(id),
+          type: "tv",
+          name: String(name),
+          poster: logo,
+          posterShape: "landscape"
+        };
+      })
+      .filter(channel => channel.id && channel.name);
 
-      name:
-        channel.name ||
-        channel.title ||
-        "Canal",
-
-      poster:
-        channel.logo_url ||
-        channel.logo ||
-        channel.poster ||
-        ""
-    }));
+    console.log(
+      `Catálogo final: ${metas.length} canais`
+    );
 
     res.json({
       metas
     });
-
-  } catch (err) {
-    console.error("[CATALOG]", err);
+  } catch (error) {
+    console.error(
+      "Erro no catálogo:",
+      error
+    );
 
     res.status(500).json({
-      metas: []
+      metas: [],
+      error: error.message
     });
   }
 });
 
+// =====================================================
+// META
+// =====================================================
 
-// ---------------------------------------------------------
-// STREAM
-// ---------------------------------------------------------
-
-app.get("/stream/tv/:id.json", async (req, res) => {
-  const id = req.params.id;
-
-  console.log("");
-  console.log("========================================");
-  console.log(`[STREAM] Solicitação: ${id}`);
-  console.log("========================================");
-
+app.get("/meta/tv/:id.json", async (req, res) => {
   try {
-    const response = await fetch(`${API_BASE}/channels`, {
-      headers: {
-        Referer: API_REFERER
-      }
-    });
+    const channels = await getChannels();
 
-    if (!response.ok) {
-      throw new Error(`API respondeu ${response.status}`);
-    }
+    const channel = channels.find(channel => {
+      const id =
+        channel.id ??
+        channel.slug ??
+        channel.channel_id ??
+        channel.code;
 
-    const data = await response.json();
-
-    const channels = Array.isArray(data)
-      ? data
-      : data.channels || data.results || [];
-
-    const channel = channels.find(ch => {
-      const channelId = String(
-        ch.id ||
-        ch.slug ||
-        ch.name ||
-        ""
-      );
-
-      return channelId === String(id);
+      return String(id) === String(req.params.id);
     });
 
     if (!channel) {
-      console.log(`[STREAM] Canal não encontrado: ${id}`);
+      return res.json({
+        meta: {
+          id: req.params.id,
+          type: "tv",
+          name: req.params.id
+        }
+      });
+    }
 
+    const name =
+      channel.name ??
+      channel.title ??
+      channel.nome ??
+      req.params.id;
+
+    const logo =
+      channel.logo_url ??
+      channel.logo ??
+      channel.image ??
+      channel.poster ??
+      "";
+
+    res.json({
+      meta: {
+        id: String(
+          channel.id ??
+          channel.slug ??
+          channel.channel_id ??
+          channel.code
+        ),
+        type: "tv",
+        name: String(name),
+        poster: logo,
+        posterShape: "landscape"
+      }
+    });
+  } catch (error) {
+    console.error("Erro no meta:", error);
+
+    res.status(500).json({
+      meta: {
+        id: req.params.id,
+        type: "tv",
+        name: req.params.id
+      }
+    });
+  }
+});
+
+// =====================================================
+// STREAM
+// =====================================================
+
+app.get("/stream/tv/:id.json", async (req, res) => {
+  try {
+    const channels = await getChannels();
+
+    const channel = channels.find(channel => {
+      const id =
+        channel.id ??
+        channel.slug ??
+        channel.channel_id ??
+        channel.code;
+
+      return String(id) === String(req.params.id);
+    });
+
+    if (!channel) {
       return res.json({
         streams: []
       });
     }
 
+    const embeds =
+      channel.embeds ??
+      channel.embed ??
+      channel.sources ??
+      [];
+
+    const embedList = Array.isArray(embeds)
+      ? embeds
+      : [embeds];
+
     console.log(
-      `[STREAM] Canal: ${channel.name || channel.title || id}`
+      `Canal ${req.params.id}: ${embedList.length} embeds`
     );
 
-    // Pega embeds conhecidos
-    let embeds = channel.embeds || [];
+    for (const embed of embedList) {
+      let url = null;
 
-    if (!Array.isArray(embeds)) {
-      embeds = [];
-    }
-
-    console.log(`[STREAM] Embeds: ${embeds.length}`);
-
-    for (const embed of embeds) {
-      const url =
-        typeof embed === "string"
-          ? embed
-          : embed.url ||
-            embed.embed_url ||
-            embed.src ||
-            embed.link;
+      if (typeof embed === "string") {
+        url = embed;
+      } else if (embed) {
+        url =
+          embed.url ??
+          embed.embed_url ??
+          embed.src ??
+          embed.link;
+      }
 
       if (!url) continue;
 
-      console.log(`[STREAM] Tentando: ${url}`);
+      console.log(
+        "Tentando resolver:",
+        url
+      );
 
-      try {
-        const hls = await resolveHLS(url);
+      const hls = await resolveHLS(url);
 
-        if (hls) {
-          console.log(`[STREAM] HLS encontrado!`);
+      if (hls) {
+        return res.json({
+          streams: [
+            {
+              name:
+                channel.name ??
+                channel.title ??
+                "NetCine",
 
-          return res.json({
-            streams: [
-              {
-                name: channel.name || "NetCine",
-                title: channel.name || "TV ao vivo",
-                url: hls,
-                type: "hls"
-              }
-            ]
-          });
-        }
-      } catch (err) {
-        console.error(
-          `[STREAM] Erro no embed ${url}:`,
-          err.message
-        );
+              title:
+                channel.name ??
+                channel.title ??
+                "NetCine",
+
+              url: hls,
+
+              type: "hls"
+            }
+          ]
+        });
       }
     }
 
-    console.log("[STREAM] Nenhum stream encontrado.");
+    console.log(
+      "Nenhum HLS encontrado para",
+      req.params.id
+    );
 
     return res.json({
       streams: []
     });
+  } catch (error) {
+    console.error(
+      "Erro no stream:",
+      error
+    );
 
-  } catch (err) {
-    console.error("[STREAM] ERRO:", err);
-
-    return res.status(500).json({
-      streams: []
+    res.status(500).json({
+      streams: [],
+      error: error.message
     });
   }
 });
 
-
-// ---------------------------------------------------------
+// =====================================================
 // START
-// ---------------------------------------------------------
+// =====================================================
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("========================================");
-  console.log("NetCine Server iniciado");
-  console.log(`Porta: ${PORT}`);
-  console.log("========================================");
-});
-
-
-// ---------------------------------------------------------
-// ENCERRAMENTO
-// ---------------------------------------------------------
-
-process.on("SIGTERM", async () => {
-  console.log("[SERVER] Encerrando...");
-
-  if (browser) {
-    try {
-      await browser.close();
-    } catch {}
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log("========================================");
+    console.log("NetCine Server iniciado");
+    console.log("Porta:", PORT);
+    console.log("========================================");
   }
-
-  process.exit(0);
-});
+);
