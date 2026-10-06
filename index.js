@@ -1,923 +1,439 @@
-const http = require("http");
-const axios = require("axios");
-const { URL } = require("url");
-const { addonBuilder, getRouter } = require("stremio-addon-sdk");
+const express = require("express");
+const { chromium } = require("playwright");
 
-const PORT = Number(process.env.PORT) || 8080;
-const HOST = "0.0.0.0";
-
-const PUBLIC_URL = (
-  process.env.PUBLIC_URL ||
-  `http://localhost:${PORT}`
-).replace(/\/$/, "");
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 const API_BASE = "https://api.reidoscanais.st";
 const API_REFERER = "https://reidoscanais.st/";
 
-const HTTP_HEADERS = {
-  Referer: API_REFERER,
-  Origin: "https://reidoscanais.st",
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
-  Accept: "*/*"
-};
+let browser = null;
 
-const manifest = {
-  id: "org.reidoscanais.stremio",
-  version: "2.0.0",
-  name: "Rei dos Canais Addon",
-  description: "Canais ao vivo do Rei dos Canais",
-
-  resources: [
-    "catalog",
-    "meta",
-    "stream"
-  ],
-
-  types: ["tv"],
-
-  catalogs: [
-    {
-      type: "tv",
-      id: "reidoscanais_tv",
-      name: "Rei dos Canais - Ao Vivo"
-    }
-  ]
-};
-
-const builder = new addonBuilder(manifest);
-
-/* =========================================================
-   BUSCAR CANAIS NA API
-   ========================================================= */
-
-async function getChannels() {
-  const response = await axios.get(
-    `${API_BASE}/channels`,
-    {
-      headers: HTTP_HEADERS,
-      timeout: 15000
-    }
-  );
-
-  const data = response.data;
-
-  if (Array.isArray(data)) {
-    return data;
+async function getBrowser() {
+  if (browser) {
+    try {
+      if (browser.isConnected()) return browser;
+    } catch {}
   }
 
-  if (Array.isArray(data?.data)) {
-    return data.data;
-  }
+  console.log("[BROWSER] Iniciando Chromium...");
 
-  if (Array.isArray(data?.channels)) {
-    return data.channels;
-  }
+  browser = await chromium.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process"
+    ]
+  });
 
-  return [];
+  return browser;
 }
 
-/* =========================================================
-   ID
-   ========================================================= */
+function isHls(url) {
+  if (!url) return false;
 
-function getChannelId(channel, index) {
-  return String(
-    channel.id ??
-    channel.channelId ??
-    channel.slug ??
-    channel.name ??
-    `channel_${index}`
-  );
-}
-
-/* =========================================================
-   NOME
-   ========================================================= */
-
-function getChannelName(channel, index) {
-  return String(
-    channel.name ??
-    channel.title ??
-    channel.channelName ??
-    `Canal ${index + 1}`
-  );
-}
-
-/* =========================================================
-   LOGO
-   ========================================================= */
-
-function getChannelPoster(channel) {
-  return (
-    channel.logo_url ??
-    channel.poster ??
-    channel.logo ??
-    channel.image ??
-    channel.icon ??
-    null
-  );
-}
-
-/* =========================================================
-   TRANSFORMAR URL
-   ========================================================= */
-
-function cleanUrl(value) {
-  if (!value || typeof value !== "string") {
-    return null;
-  }
-
-  let url = value.trim();
-
-  url = url
-    .replace(/\\u0026/g, "&")
-    .replace(/\\u003d/g, "=")
-    .replace(/\\\//g, "/")
-    .replace(/&amp;/g, "&")
-    .replace(/\\x26/g, "&");
-
-  return url;
-}
-
-/* =========================================================
-   VERIFICAR SE É HLS
-   ========================================================= */
-
-function isHlsUrl(url) {
-  if (!url || typeof url !== "string") {
-    return false;
-  }
+  const value = url.toLowerCase();
 
   return (
-    /\.m3u8(?:[?#]|$)/i.test(url) ||
-    /\/hls(?:[/?]|$)/i.test(url)
+    value.includes(".m3u8") ||
+    value.includes("application/vnd.apple.mpegurl") ||
+    value.includes("application/x-mpegurl") ||
+    value.includes("mpegurl")
   );
 }
 
-/* =========================================================
-   EXTRAIR STREAM_URLS DO PLAYER
-   ========================================================= */
+async function resolveHLS(pageUrl) {
+  console.log(`[RESOLVE] Abrindo player: ${pageUrl}`);
 
-function extractStreamUrls(html) {
-  const urls = [];
+  const browser = await getBrowser();
 
-  if (!html || typeof html !== "string") {
-    return urls;
+  const context = await browser.newContext({
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
+
+    extraHTTPHeaders: {
+      Referer: API_REFERER
+    },
+
+    viewport: {
+      width: 1280,
+      height: 720
+    }
+  });
+
+  const page = await context.newPage();
+
+  const found = new Set();
+
+  function capture(url, source) {
+    if (!url) return;
+
+    if (isHls(url)) {
+      if (!found.has(url)) {
+        found.add(url);
+        console.log(`[HLS] Encontrado via ${source}: ${url}`);
+      }
+    }
   }
 
-  /*
-   Exemplo procurado:
+  // Captura requisições normais
+  page.on("request", request => {
+    capture(request.url(), "request");
+  });
 
-   window.STREAM_URLS = [
-      "https://servidor/live/canal/index.m3u8"
-   ];
-  */
+  // Captura respostas
+  page.on("response", response => {
+    const url = response.url();
 
-  const patterns = [
-    /window\.STREAM_URLS\s*=\s*(\[[\s\S]*?\])\s*;/i,
+    capture(url, "response");
 
-    /STREAM_URLS\s*=\s*(\[[\s\S]*?\])\s*;/i,
+    const contentType =
+      response.headers()["content-type"] || "";
 
-    /STREAM_URLS\s*:\s*(\[[\s\S]*?\])/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-
-    if (!match) {
-      continue;
+    if (
+      contentType.includes("mpegurl") ||
+      contentType.includes("application/vnd.apple.mpegurl")
+    ) {
+      capture(url, "content-type");
     }
+  });
 
-    const arrayText = match[1];
+  // Intercepta possíveis URLs colocadas pelo player
+  page.on("console", msg => {
+    const text = msg.text();
 
-    const stringMatches = arrayText.match(
-      /["'`](https?:\/\/[^"'`]+)["'`]/gi
-    );
+    if (text.includes(".m3u8")) {
+      console.log("[PAGE] Console:", text);
 
-    if (!stringMatches) {
-      continue;
-    }
-
-    for (const item of stringMatches) {
-      const urlMatch = item.match(
-        /["'`](https?:\/\/[^"'`]+)["'`]/
+      const matches = text.match(
+        /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi
       );
 
-      if (!urlMatch) {
-        continue;
-      }
-
-      const url = cleanUrl(urlMatch[1]);
-
-      if (url && isHlsUrl(url)) {
-        urls.push(url);
-      }
-    }
-  }
-
-  /*
-   Fallback:
-   procura qualquer URL .m3u8 dentro do HTML.
-  */
-
-  if (urls.length === 0) {
-    const matches = html.match(
-      /https?:\/\/[^\s"'<>\\]+\.m3u8(?:\?[^\s"'<>\\]*)?/gi
-    );
-
-    if (matches) {
-      for (const value of matches) {
-        const url = cleanUrl(value);
-
-        if (url && isHlsUrl(url)) {
-          urls.push(url);
+      if (matches) {
+        for (const url of matches) {
+          capture(url, "console");
         }
       }
     }
-  }
-
-  return [...new Set(urls)];
-}
-
-/* =========================================================
-   RESOLVER EMBED
-   ========================================================= */
-
-async function resolveEmbed(embedUrl) {
-  if (!embedUrl) {
-    return [];
-  }
-
-  /*
-   Se a própria API já entregar um .m3u8,
-   não precisamos abrir o player.
-  */
-
-  if (isHlsUrl(embedUrl)) {
-    return [embedUrl];
-  }
-
-  console.log(
-    "[RESOLVE] Abrindo player:",
-    embedUrl
-  );
+  });
 
   try {
-    const response = await axios.get(
-      embedUrl,
+    await page.goto(pageUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000
+    });
+  } catch (err) {
+    console.log("[PAGE] goto:", err.message);
+  }
+
+  console.log("[RESOLVE] Página carregada. Aguardando player...");
+
+  // Dá tempo para JS, iframe e player carregarem
+  for (let i = 0; i < 20; i++) {
+    if (found.size > 0) break;
+
+    await page.waitForTimeout(1000);
+
+    // Procura também no HTML/DOM atual
+    try {
+      const html = await page.content();
+
+      const matches = html.match(
+        /https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/gi
+      );
+
+      if (matches) {
+        for (const url of matches) {
+          capture(url, "html");
+        }
+      }
+    } catch {}
+
+    // Procura dentro dos frames
+    for (const frame of page.frames()) {
+      try {
+        const html = await frame.content();
+
+        const matches = html.match(
+          /https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/gi
+        );
+
+        if (matches) {
+          for (const url of matches) {
+            capture(url, "iframe");
+          }
+        }
+      } catch {}
+    }
+  }
+
+  const result = [...found][0] || null;
+
+  await context.close();
+
+  if (result) {
+    console.log(`[RESOLVE] HLS FINAL: ${result}`);
+  } else {
+    console.log("[RESOLVE] Nenhum HLS encontrado.");
+  }
+
+  return result;
+}
+
+
+// ---------------------------------------------------------
+// HEALTH
+// ---------------------------------------------------------
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "netcine-server"
+  });
+});
+
+
+// ---------------------------------------------------------
+// MANIFEST
+// ---------------------------------------------------------
+
+app.get("/manifest.json", async (req, res) => {
+  res.json({
+    id: "netcine.server",
+    version: "2.3.0",
+    name: "NetCine",
+    description: "Canais de TV ao vivo",
+    logo: "https://cdn.reidoscanais.st/imagens/logo.png",
+
+    resources: [
+      "catalog",
+      "meta",
+      "stream"
+    ],
+
+    types: [
+      "tv"
+    ],
+
+    catalogs: [
       {
-        headers: {
-          ...HTTP_HEADERS,
-          Referer: API_REFERER
-        },
-        timeout: 15000,
-        maxRedirects: 5,
-        responseType: "text"
+        type: "tv",
+        id: "netcine",
+        name: "NetCine",
+        extra: [
+          {
+            name: "search",
+            isRequired: false
+          }
+        ]
       }
-    );
-
-    const html = response.data;
-
-    console.log(
-      "[RESOLVE] HTML recebido:",
-      typeof html === "string"
-        ? html.length
-        : 0,
-      "bytes"
-    );
-
-    const urls = extractStreamUrls(html);
-
-    console.log(
-      "[RESOLVE] HLS encontrados:",
-      urls.length
-    );
-
-    for (const url of urls) {
-      console.log(
-        "[RESOLVE] HLS:",
-        url
-      );
-    }
-
-    return urls;
-
-  } catch (error) {
-
-    console.error(
-      "[RESOLVE ERROR]",
-      error.response?.status || "",
-      error.message
-    );
-
-    return [];
-  }
-}
-
-/* =========================================================
-   CATALOG
-   ========================================================= */
-
-builder.defineCatalogHandler(async (args) => {
-
-  console.log(
-    "[CATALOG REQUEST]",
-    JSON.stringify(args)
-  );
-
-  try {
-
-    const channels = await getChannels();
-
-    const metas = channels.map(
-      (channel, index) => {
-
-        const id =
-          getChannelId(channel, index);
-
-        const name =
-          getChannelName(channel, index);
-
-        const poster =
-          getChannelPoster(channel);
-
-        const meta = {
-          id,
-          type: "tv",
-          name
-        };
-
-        if (poster) {
-          meta.poster = String(poster);
-        }
-
-        return meta;
-      }
-    );
-
-    console.log(
-      "[CATALOG] Canais encontrados:",
-      metas.length
-    );
-
-    return {
-      metas
-    };
-
-  } catch (error) {
-
-    console.error(
-      "[CATALOG ERROR]",
-      error.response?.status || "",
-      error.message
-    );
-
-    return {
-      metas: []
-    };
-  }
+    ]
+  });
 });
 
-/* =========================================================
-   META
-   ========================================================= */
 
-builder.defineMetaHandler(async (args) => {
+// ---------------------------------------------------------
+// CATÁLOGO
+// ---------------------------------------------------------
 
-  console.log(
-    "[META REQUEST]",
-    JSON.stringify(args)
-  );
-
+app.get("/catalog/tv/netcine.json", async (req, res) => {
   try {
+    const response = await fetch(`${API_BASE}/channels`, {
+      headers: {
+        Referer: API_REFERER
+      }
+    });
 
-    const channelId = args.id;
-
-    if (!channelId) {
-      return {
-        meta: null
-      };
+    if (!response.ok) {
+      throw new Error(`API respondeu ${response.status}`);
     }
 
-    const channels =
-      await getChannels();
+    const data = await response.json();
 
-    const channelIndex =
-      channels.findIndex(
-        (channel, index) =>
-          getChannelId(
-            channel,
-            index
-          ) === String(channelId)
-      );
+    const channels = Array.isArray(data)
+      ? data
+      : data.channels || data.results || [];
 
-    if (channelIndex === -1) {
+    const metas = channels.map(channel => ({
+      id: String(
+        channel.id ||
+        channel.slug ||
+        channel.name
+      ),
 
-      return {
-        meta: {
-          id: String(channelId),
-          type: "tv",
-          name: String(channelId)
-        }
-      };
-    }
-
-    const channel =
-      channels[channelIndex];
-
-    const name =
-      getChannelName(
-        channel,
-        channelIndex
-      );
-
-    const poster =
-      getChannelPoster(channel);
-
-    const meta = {
-      id: String(channelId),
       type: "tv",
-      name
-    };
 
-    if (poster) {
-      meta.poster = String(poster);
-    }
+      name:
+        channel.name ||
+        channel.title ||
+        "Canal",
 
-    if (channel.description) {
-      meta.description =
-        String(channel.description);
-    }
+      poster:
+        channel.logo_url ||
+        channel.logo ||
+        channel.poster ||
+        ""
+    }));
 
-    return {
-      meta
-    };
+    res.json({
+      metas
+    });
 
-  } catch (error) {
+  } catch (err) {
+    console.error("[CATALOG]", err);
 
-    console.error(
-      "[META ERROR]",
-      error.response?.status || "",
-      error.message
-    );
-
-    return {
-      meta: null
-    };
+    res.status(500).json({
+      metas: []
+    });
   }
 });
 
-/* =========================================================
-   STREAM
-   ========================================================= */
 
-builder.defineStreamHandler(async (args) => {
+// ---------------------------------------------------------
+// STREAM
+// ---------------------------------------------------------
 
-  console.log(
-    "[STREAM REQUEST]",
-    JSON.stringify(args)
-  );
+app.get("/stream/tv/:id.json", async (req, res) => {
+  const id = req.params.id;
+
+  console.log("");
+  console.log("========================================");
+  console.log(`[STREAM] Solicitação: ${id}`);
+  console.log("========================================");
 
   try {
+    const response = await fetch(`${API_BASE}/channels`, {
+      headers: {
+        Referer: API_REFERER
+      }
+    });
 
-    const channelId = args.id;
-
-    if (!channelId) {
-
-      console.log(
-        "[STREAM] ID não informado"
-      );
-
-      return {
-        streams: []
-      };
+    if (!response.ok) {
+      throw new Error(`API respondeu ${response.status}`);
     }
 
-    const channels =
-      await getChannels();
+    const data = await response.json();
 
-    const channelIndex =
-      channels.findIndex(
-        (channel, index) =>
-          getChannelId(
-            channel,
-            index
-          ) === String(channelId)
+    const channels = Array.isArray(data)
+      ? data
+      : data.channels || data.results || [];
+
+    const channel = channels.find(ch => {
+      const channelId = String(
+        ch.id ||
+        ch.slug ||
+        ch.name ||
+        ""
       );
 
-    if (channelIndex === -1) {
+      return channelId === String(id);
+    });
 
-      console.log(
-        "[STREAM] Canal não encontrado:",
-        channelId
-      );
+    if (!channel) {
+      console.log(`[STREAM] Canal não encontrado: ${id}`);
 
-      return {
+      return res.json({
         streams: []
-      };
+      });
     }
-
-    const channel =
-      channels[channelIndex];
-
-    const embeds =
-      Array.isArray(channel.embeds)
-        ? channel.embeds
-        : [];
 
     console.log(
-      "[STREAM] Canal:",
-      getChannelName(
-        channel,
-        channelIndex
-      )
+      `[STREAM] Canal: ${channel.name || channel.title || id}`
     );
 
-    console.log(
-      "[STREAM] Embeds encontrados:",
-      embeds.length
-    );
+    // Pega embeds conhecidos
+    let embeds = channel.embeds || [];
 
-    if (embeds.length === 0) {
-
-      console.log(
-        "[STREAM] Nenhum embed disponível"
-      );
-
-      return {
-        streams: []
-      };
+    if (!Array.isArray(embeds)) {
+      embeds = [];
     }
 
-    const streams = [];
+    console.log(`[STREAM] Embeds: ${embeds.length}`);
 
     for (const embed of embeds) {
+      const url =
+        typeof embed === "string"
+          ? embed
+          : embed.url ||
+            embed.embed_url ||
+            embed.src ||
+            embed.link;
 
-      if (
-        !embed ||
-        typeof embed !== "object"
-      ) {
-        continue;
-      }
+      if (!url) continue;
 
-      /*
-       Primeiro tenta campos que já sejam
-       diretamente HLS.
-      */
+      console.log(`[STREAM] Tentando: ${url}`);
 
-      const directUrl =
-        embed.m3u8_url ??
-        embed.m3u8 ??
-        embed.stream_url ??
-        embed.streamUrl ??
-        embed.hls_url ??
-        embed.hls ??
-        null;
+      try {
+        const hls = await resolveHLS(url);
 
-      if (
-        directUrl &&
-        typeof directUrl === "string" &&
-        isHlsUrl(directUrl)
-      ) {
+        if (hls) {
+          console.log(`[STREAM] HLS encontrado!`);
 
-        const url =
-          cleanUrl(directUrl);
-
-        console.log(
-          "[STREAM] HLS direto:",
-          url
+          return res.json({
+            streams: [
+              {
+                name: channel.name || "NetCine",
+                title: channel.name || "TV ao vivo",
+                url: hls,
+                type: "hls"
+              }
+            ]
+          });
+        }
+      } catch (err) {
+        console.error(
+          `[STREAM] Erro no embed ${url}:`,
+          err.message
         );
-
-        streams.push({
-          url,
-          title:
-            embed.provider
-              ? String(embed.provider)
-              : "HLS"
-        });
-
-        continue;
-      }
-
-      /*
-       Caso normal:
-       API entrega embed_url.
-      */
-
-      const embedUrl =
-        embed.embed_url ??
-        embed.url ??
-        embed.src ??
-        null;
-
-      if (
-        !embedUrl ||
-        typeof embedUrl !== "string"
-      ) {
-        continue;
-      }
-
-      console.log(
-        "[STREAM] Embed:",
-        embedUrl
-      );
-
-      const hlsUrls =
-        await resolveEmbed(embedUrl);
-
-      const provider =
-        embed.provider
-          ? String(embed.provider)
-          : "Servidor";
-
-      const quality =
-        embed.quality
-          ? String(embed.quality)
-          : "";
-
-      for (const hlsUrl of hlsUrls) {
-
-        streams.push({
-          url: hlsUrl,
-
-          title: quality
-            ? `${provider} - ${quality}`
-            : provider,
-
-          behaviorHints: {
-            notWebReady: false
-          }
-        });
       }
     }
 
-    /*
-     Remove URLs duplicadas.
-    */
+    console.log("[STREAM] Nenhum stream encontrado.");
 
-    const uniqueStreams = [];
-
-    const seen = new Set();
-
-    for (const stream of streams) {
-
-      if (
-        !stream.url ||
-        seen.has(stream.url)
-      ) {
-        continue;
-      }
-
-      seen.add(stream.url);
-
-      uniqueStreams.push(stream);
-    }
-
-    console.log(
-      "[STREAM] Streams HLS disponíveis:",
-      uniqueStreams.length
-    );
-
-    return {
-      streams: uniqueStreams
-    };
-
-  } catch (error) {
-
-    console.error(
-      "[STREAM ERROR]",
-      error.response?.status || "",
-      error.message
-    );
-
-    return {
+    return res.json({
       streams: []
-    };
+    });
+
+  } catch (err) {
+    console.error("[STREAM] ERRO:", err);
+
+    return res.status(500).json({
+      streams: []
+    });
   }
 });
 
-/* =========================================================
-   ROUTER
-   ========================================================= */
 
-const addonInterface =
-  builder.getInterface();
+// ---------------------------------------------------------
+// START
+// ---------------------------------------------------------
 
-const addonRouter =
-  getRouter(addonInterface);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("========================================");
+  console.log("NetCine Server iniciado");
+  console.log(`Porta: ${PORT}`);
+  console.log("========================================");
+});
 
-/* =========================================================
-   SERVIDOR
-   ========================================================= */
 
-const server =
-  http.createServer(
-    (req, res) => {
+// ---------------------------------------------------------
+// ENCERRAMENTO
+// ---------------------------------------------------------
 
-      const requestUrl =
-        new URL(
-          req.url || "/",
-          `http://${req.headers.host || "localhost"}`
-        );
+process.on("SIGTERM", async () => {
+  console.log("[SERVER] Encerrando...");
 
-      /*
-       CORS
-      */
-
-      res.setHeader(
-        "Access-Control-Allow-Origin",
-        "*"
-      );
-
-      res.setHeader(
-        "Access-Control-Allow-Headers",
-        "*"
-      );
-
-      /* HEALTH */
-
-      if (
-        requestUrl.pathname === "/health"
-      ) {
-
-        res.writeHead(
-          200,
-          {
-            "Content-Type":
-              "application/json; charset=utf-8"
-          }
-        );
-
-        res.end(
-          JSON.stringify({
-            status: "ok",
-            service: "stremio-addon",
-            port: PORT,
-            timestamp:
-              new Date().toISOString()
-          })
-        );
-
-        return;
-      }
-
-      /* HOME */
-
-      if (
-        requestUrl.pathname === "/"
-      ) {
-
-        res.writeHead(
-          200,
-          {
-            "Content-Type":
-              "text/plain; charset=utf-8"
-          }
-        );
-
-        res.end(
-          "Stremio Addon online.\n" +
-          `Manifest: ${PUBLIC_URL}/manifest.json\n` +
-          `Health: ${PUBLIC_URL}/health\n`
-        );
-
-        return;
-      }
-
-      /* STREMIO */
-
-      try {
-
-        addonRouter(
-          req,
-          res,
-          (error) => {
-
-            if (error) {
-
-              console.error(
-                "[ROUTER ERROR]",
-                error
-              );
-
-              if (!res.headersSent) {
-
-                res.writeHead(
-                  500,
-                  {
-                    "Content-Type":
-                      "application/json; charset=utf-8"
-                  }
-                );
-
-                res.end(
-                  JSON.stringify({
-                    error:
-                      "Internal server error"
-                  })
-                );
-              }
-
-              return;
-            }
-
-            if (!res.headersSent) {
-
-              res.writeHead(
-                404,
-                {
-                  "Content-Type":
-                    "application/json; charset=utf-8"
-                }
-              );
-
-              res.end(
-                JSON.stringify({
-                  error: "Not found"
-                })
-              );
-            }
-          }
-        );
-
-      } catch (error) {
-
-        console.error(
-          "[SERVER ERROR]",
-          error
-        );
-
-        if (!res.headersSent) {
-
-          res.writeHead(
-            500,
-            {
-              "Content-Type":
-                "application/json; charset=utf-8"
-            }
-          );
-
-          res.end(
-            JSON.stringify({
-              error:
-                "Internal server error"
-            })
-          );
-        }
-      }
-    }
-  );
-
-/* =========================================================
-   INICIAR
-   ========================================================= */
-
-server.listen(
-  PORT,
-  HOST,
-  () => {
-
-    console.log(
-      "======================================"
-    );
-
-    console.log(
-      "Stremio Addon iniciado"
-    );
-
-    console.log(
-      "Versão:",
-      manifest.version
-    );
-
-    console.log(
-      "Porta:",
-      PORT
-    );
-
-    console.log(
-      "Host:",
-      HOST
-    );
-
-    console.log(
-      "URL pública:",
-      PUBLIC_URL
-    );
-
-    console.log(
-      "Health:",
-      `${PUBLIC_URL}/health`
-    );
-
-    console.log(
-      "Manifest:",
-      `${PUBLIC_URL}/manifest.json`
-    );
-
-    console.log(
-      "======================================"
-    );
+  if (browser) {
+    try {
+      await browser.close();
+    } catch {}
   }
-);
+
+  process.exit(0);
+});
