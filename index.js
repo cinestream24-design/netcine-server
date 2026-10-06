@@ -1,11 +1,7 @@
 const http = require("http");
-const https = require("https");
 const axios = require("axios");
 const { URL } = require("url");
-const {
-  addonBuilder,
-  getRouter
-} = require("stremio-addon-sdk");
+const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 
 const PORT = Number(process.env.PORT) || 8080;
 const HOST = "0.0.0.0";
@@ -36,29 +32,24 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-/*
- * =========================================================
- * CATÁLOGO
- * =========================================================
- */
+/* =========================
+   CATALOG
+========================= */
 
 builder.defineCatalogHandler(async (args) => {
-  console.log("[CATALOG]", JSON.stringify(args));
+  console.log("[CATALOG REQUEST]", JSON.stringify(args));
 
   try {
     const response = await axios.get(`${API_BASE}/channels`, {
       headers: {
         Referer: API_REFERER,
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0"
       },
       timeout: 15000
     });
 
     const data = response.data;
 
-    // Aceita tanto array direto quanto respostas
-    // encapsuladas em propriedades comuns.
     const channels = Array.isArray(data)
       ? data
       : Array.isArray(data.channels)
@@ -86,17 +77,22 @@ builder.defineCatalogHandler(async (args) => {
         channel.logo ??
         channel.image ??
         channel.icon ??
-        "";
+        undefined;
 
-      return {
+      const meta = {
         id: String(id),
         type: "tv",
-        name: String(name),
-        poster: poster ? String(poster) : undefined
+        name: String(name)
       };
+
+      if (poster) {
+        meta.poster = String(poster);
+      }
+
+      return meta;
     });
 
-    console.log(`[CATALOG] ${metas.length} canais encontrados`);
+    console.log("[CATALOG] Canais encontrados:", metas.length);
 
     return {
       metas
@@ -114,20 +110,18 @@ builder.defineCatalogHandler(async (args) => {
   }
 });
 
-/*
- * =========================================================
- * STREAM
- * =========================================================
- */
+/* =========================
+   STREAM
+========================= */
 
 builder.defineStreamHandler(async (args) => {
-  console.log("[STREAM]", JSON.stringify(args));
+  console.log("[STREAM REQUEST]", JSON.stringify(args));
 
   try {
     const channelId = args.id;
 
     if (!channelId) {
-      console.log("[STREAM] ID do canal não informado");
+      console.log("[STREAM] ID não informado");
       return { streams: [] };
     }
 
@@ -136,8 +130,7 @@ builder.defineStreamHandler(async (args) => {
       {
         headers: {
           Referer: API_REFERER,
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          "User-Agent": "Mozilla/5.0"
         },
         timeout: 15000
       }
@@ -149,19 +142,19 @@ builder.defineStreamHandler(async (args) => {
 
     if (typeof data === "string") {
       streamUrl = data;
-    } else if (data) {
+    } else if (data && typeof data === "object") {
       streamUrl =
-        data.url ??
-        data.stream ??
-        data.streamUrl ??
-        data.src ??
-        data.source ??
-        data.file ??
+        data.url ||
+        data.stream ||
+        data.streamUrl ||
+        data.src ||
+        data.source ||
+        data.file ||
         null;
     }
 
     if (!streamUrl || typeof streamUrl !== "string") {
-      console.log("[STREAM] Nenhuma URL encontrada");
+      console.log("[STREAM] URL não encontrada");
       return { streams: [] };
     }
 
@@ -188,30 +181,24 @@ builder.defineStreamHandler(async (args) => {
   }
 });
 
-/*
- * =========================================================
- * INTERFACE / ROUTER DO STREMIO
- * =========================================================
- */
+/* =========================
+   STREMIO ROUTER
+========================= */
 
 const addonInterface = builder.getInterface();
 const addonRouter = getRouter(addonInterface);
 
-/*
- * =========================================================
- * HTTP SERVER
- * =========================================================
- */
+/* =========================
+   HTTP SERVER
+========================= */
 
 const server = http.createServer((req, res) => {
   const requestUrl = new URL(
-    req.url,
+    req.url || "/",
     `http://${req.headers.host || "localhost"}`
   );
 
-  /*
-   * Health check da Railway
-   */
+  /* HEALTH */
   if (requestUrl.pathname === "/health") {
     res.writeHead(200, {
       "Content-Type": "application/json; charset=utf-8"
@@ -229,16 +216,14 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  /*
-   * Página inicial
-   */
+  /* HOME */
   if (requestUrl.pathname === "/") {
     res.writeHead(200, {
       "Content-Type": "text/plain; charset=utf-8"
     });
 
     res.end(
-      "Stremio Addon online.\n\n" +
+      "Stremio Addon online.\n" +
       `Manifest: ${PUBLIC_URL}/manifest.json\n` +
       `Health: ${PUBLIC_URL}/health\n`
     );
@@ -246,14 +231,11 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  /*
-   * Todas as rotas do Stremio são entregues
-   * ao router oficial do SDK.
-   */
+  /* STREMIO */
   try {
-    addonRouter(req, res, (err) => {
-      if (err) {
-        console.error("[ROUTER ERROR]", err);
+    addonRouter(req, res, (error) => {
+      if (error) {
+        console.error("[ROUTER ERROR]", error);
 
         if (!res.headersSent) {
           res.writeHead(500, {
@@ -299,43 +281,17 @@ const server = http.createServer((req, res) => {
   }
 });
 
-/*
- * =========================================================
- * INICIAR
- * =========================================================
- */
+/* =========================
+   START SERVER
+========================= */
 
 server.listen(PORT, HOST, () => {
   console.log("======================================");
   console.log("Stremio Addon iniciado");
-  console.log(`Porta: ${PORT}`);
-  console.log(`Host: ${HOST}`);
-  console.log(`URL pública: ${PUBLIC_URL}`);
-  console.log(`Health: ${PUBLIC_URL}/health`);
-  console.log(`Manifest: ${PUBLIC_URL}/manifest.json`);
+  console.log("Porta:", PORT);
+  console.log("Host:", HOST);
+  console.log("URL pública:", PUBLIC_URL);
+  console.log("Health:", `${PUBLIC_URL}/health`);
+  console.log("Manifest:", `${PUBLIC_URL}/manifest.json`);
   console.log("======================================");
 });
-
-/*
- * =========================================================
- * ERROS DO PROCESSO
- * =========================================================
- */
-
-process.on("uncaughtException", (error) => {
-  console.error("[UNCAUGHT EXCEPTION]", error);
-});
-
-process.on("unhandledRejection", (error) => {
-  console.error("[UNHANDLED REJECTION]", error);
-});
-
-process.on("SIGTERM", () => {
-  console.log("[SIGTERM] Encerrando servidor...");
-  server.close(() => {
-    process.exit(0);
-  });
-});
-
-process.on("SIGINT", () => {
-  console.log("[SIGINT]
