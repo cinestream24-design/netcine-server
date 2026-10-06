@@ -35,39 +35,36 @@ if (!TMDB_API_KEY) {
   console.warn('[NetCine] ATENÇÃO: TMDB_API_KEY não definida nas variáveis de ambiente!');
 }
 
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
 const HTTP_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'User-Agent': USER_AGENT,
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
 };
 
-// ---------- Extrator de Stream Web (Bypass de Web Players HTML) ----------
+// ---------- Extrator de stream para canais de TV (web players) ----------
 
-async function resolveDirectStreamUrl(webUrl) {
+// Devolve { url, direct, referer }. direct = true quando achou um .m3u8 tocável.
+async function resolveDirectStream(webUrl) {
   try {
-    const res = await axios.get(webUrl, {
-      headers: HTTP_HEADERS,
-      timeout: 6000
-    });
+    if (/\.m3u8(\?|$)/i.test(webUrl)) return { url: webUrl, direct: true };
 
-    const html = res.data;
-    if (typeof html !== 'string') return webUrl;
+    const res = await axios.get(webUrl, { headers: HTTP_HEADERS, timeout: 6000, responseType: 'text' });
+    const html = typeof res.data === 'string' ? res.data : '';
 
-    // Se o retorno já for um manifesto M3U8 nativo
-    if (html.includes('#EXTM3U')) {
-      return webUrl;
-    }
+    // Já é um manifesto M3U8
+    if (html.trim().startsWith('#EXTM3U')) return { url: webUrl, direct: true };
 
-    // Procura por URLs .m3u8 dentro de tags <script> ou parâmetros JavaScript no HTML
-    const match = html.match(/(https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)/i);
-    if (match) {
-      return match[1];
-    }
+    // Procura um .m3u8 no HTML/JS da página (inclusive com barras escapadas: https:\/\/...)
+    const text = html.replace(/\\\//g, '/');
+    const match = text.match(/https?:\/\/[^"'`\s\\<>]+\.m3u8[^"'`\s\\<>]*/i);
+    if (match) return { url: match[0], direct: true, referer: webUrl };
 
-    return webUrl;
+    return { url: webUrl, direct: false };
   } catch (err) {
     console.error(`[NetCine TV] Erro ao extrair stream de ${webUrl}:`, err.message);
-    return webUrl;
+    return { url: webUrl, direct: false };
   }
 }
 
@@ -465,7 +462,7 @@ function parseStarckNetPost(html, imdbId) {
     const groupAudio = detectAudio(groupName);
 
     $(group).find('.o-arquivo').each((__, file) => {
-      const $file =$(file);
+      const $file = $(file);
       const magnet = $file.find('a[href^="magnet:"]').first().attr('href');
       if (!magnet) return;
 
@@ -478,7 +475,9 @@ function parseStarckNetPost(html, imdbId) {
     });
   });
 
-  if (items.length === 0 && $('.o-lista').length === 0) {$('a[href^="magnet:"]').each((_, a) => {
+  // Plano B: se o layout mudar, pega qualquer magnet da página
+  if (items.length === 0 && $('.o-lista').length === 0) {
+    $('a[href^="magnet:"]').each((_, a) => {
       const context = clean($(a).parent().text());
       add(makeItem($(a).attr('href'), context, null, STARCKNET_NAME));
     });
@@ -548,8 +547,8 @@ async function searchComando(queryTitle) {
       if (href.startsWith('/')) href = COMANDO_URL + href;
       if (!href.startsWith(COMANDO_URL) || href.includes('/?s=')) return;
 
-      const $item =$(elem).closest('article, .post, .entry');
-      const title = clean($(elem).text() \vert{}\vert{}$item.find('h2, .entry-title').text());
+      const $item = $(elem).closest('article, .post, .entry');
+      const title = clean($(elem).text() || $item.find('h2, .entry-title').text());
       const metaText = clean($item.text());
 
       if (!byUrl.has(href)) {
@@ -600,7 +599,7 @@ async function extractComandoMagnets(postUrl, imdbId) {
     }
 
     const $ = cheerio.load(html);
-    const postAudio = detectAudio(clean($('h1').text() + ' ' +$('title').text()));
+    const postAudio = detectAudio(clean($('h1').text() + ' ' + $('title').text()));
     if (postAudio && postAudio.rank === 2) {
       console.log(`[Comando] Post legendado ignorado: ${postUrl}`);
       return [];
@@ -610,8 +609,8 @@ async function extractComandoMagnets(postUrl, imdbId) {
     const seen = new Set();
 
     $('a[href^="magnet:"]').each((_, elem) => {
-      const $a =$(elem);
-      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
+      const $a = $(elem);
+      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
 
       const item = makeItem($a.attr('href'), context, postAudio, COMANDO_NAME, true);
       if (!item || seen.has(item.hash)) return;
@@ -821,7 +820,7 @@ const ALL_SOURCE = {
 function buildManifest(src) {
   const manifest = {
     id: src.key === 'all' ? 'org.netcine.addon' : `org.netcine.${src.key}`,
-    version: '2.2.0',
+    version: '2.2.1',
     name: src.name,
     description: `Links magnet de filmes em Dual Áudio (${src.name})`,
     resources: ['stream'],
@@ -1133,20 +1132,31 @@ const server = http.createServer(async (req, res) => {
     if (sm) {
       const type = decodeURIComponent(sm[1]);
       const id = decodeURIComponent(sm[2]);
+
       if (type === 'tv' && src.key === 'all') {
         const ch = CANAIS_TV.find((c) => c.id === id);
         if (!ch) return sendJson(res, 200, { streams: [] });
 
-        // Extrai a URL M3U8 nativa caso o canal seja um Web Player encapsulado
-        const directUrl = await resolveDirectStreamUrl(ch.streamUrl);
+        // Se o canal for um web player, tenta achar o .m3u8 dentro da página
+        const r = await resolveDirectStream(ch.streamUrl);
+        const stream = { name: 'NetCine TV', title: `📺 ${ch.name}\n🌐 Transmissão Ao Vivo (HD)` };
 
-        // Usamos 'url' em vez de 'externalUrl' para forçar a reprodução interna
-        const streams = [{
-          title: `📺 ${ch.name}\n🌐 Transmissão Ao Vivo (HD)`,
-          url: directUrl
-        }];
-        return sendJson(res, 200, { streams });
+        if (r.direct) {
+          // 'url' faz o player tocar o vídeo dentro do app
+          stream.url = r.url;
+          if (r.referer) {
+            stream.behaviorHints = {
+              notWebReady: true,
+              proxyHeaders: { request: { Referer: r.referer, 'User-Agent': USER_AGENT } }
+            };
+          }
+        } else {
+          // Não achou vídeo direto: abre a página do canal no navegador
+          stream.externalUrl = r.url;
+        }
+        return sendJson(res, 200, { streams: [stream] });
       }
+
       if (type !== 'movie') return sendJson(res, 200, { streams: [] });
       return sendJson(res, 200, await handleStream(src, id, cfg));
     }
@@ -1162,4 +1172,12 @@ const PORT = process.env.PORT || 7000;
 
 server.listen(PORT, () => {
   console.log(`[NetCine] Addons rodando na porta ${PORT}: ${SOURCES.map((s) => '/' + s.key).join(', ')}`);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[NetCine Erro Não Tratado]:', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[NetCine Rejeição Não Tratada]:', reason);
 });
