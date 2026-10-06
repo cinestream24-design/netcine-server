@@ -198,7 +198,10 @@ builder.defineStreamHandler(async (args) => {
 
   let targetUrl = null;
 
-  // Caso a API retorne diretamente uma URL
+  // ====================================================
+  // API RETORNANDO URL DIRETAMENTE
+  // ====================================================
+
   if (
     typeof data === "string" &&
     /^https?:\/\//i.test(data)
@@ -208,7 +211,10 @@ builder.defineStreamHandler(async (args) => {
 
   }
 
-  // Caso a API retorne um objeto
+  // ====================================================
+  // API RETORNANDO OBJETO
+  // ====================================================
+
   else if (
     typeof data === "object" &&
     data !== null
@@ -222,6 +228,10 @@ builder.defineStreamHandler(async (args) => {
       data.m3u8 ||
       null;
   }
+
+  // ====================================================
+  // NENHUMA URL
+  // ====================================================
 
   if (!targetUrl) {
 
@@ -238,7 +248,10 @@ builder.defineStreamHandler(async (args) => {
     `[STREAM] URL encontrada para ${channelId}`
   );
 
-  // URL pública do proxy
+  // ====================================================
+  // URL DO PROXY
+  // ====================================================
+
   const proxyUrl =
     `${PUBLIC_URL}/proxy?url=${encodeURIComponent(
       targetUrl
@@ -248,7 +261,10 @@ builder.defineStreamHandler(async (args) => {
 
     streams: [
 
-      // Stream direto
+      // ------------------------------------------------
+      // STREAM DIRETO
+      // ------------------------------------------------
+
       {
         title:
           "Rei dos Canais | Direct Stream",
@@ -260,7 +276,10 @@ builder.defineStreamHandler(async (args) => {
         }
       },
 
-      // Proxy
+      // ------------------------------------------------
+      // STREAM PELO SERVIDOR
+      // ------------------------------------------------
+
       {
         title:
           "Rei dos Canais | Server Proxy",
@@ -284,303 +303,623 @@ const sdkInterface =
   builder.getInterface();
 
 // ======================================================
-// SERVIDOR HTTP
+// FUNÇÃO PARA ENVIAR JSON
 // ======================================================
 
-const server = http.createServer(
-  (req, res) => {
+function sendJson(res, statusCode, data) {
+
+  if (res.headersSent) {
+    return;
+  }
+
+  res.writeHead(
+    statusCode,
+    {
+      "Content-Type":
+        "application/json; charset=utf-8",
+
+      "Access-Control-Allow-Origin":
+        "*",
+
+      "Access-Control-Allow-Methods":
+        "GET, OPTIONS",
+
+      "Access-Control-Allow-Headers":
+        "*",
+
+      "Cache-Control":
+        "no-cache"
+    }
+  );
+
+  res.end(
+    JSON.stringify(data)
+  );
+}
+
+// ======================================================
+// PARSER DOS EXTRAS DO STREMIO
+// ======================================================
+
+function parseExtra(extraString) {
+
+  const extra = {};
+
+  if (!extraString) {
+    return extra;
+  }
+
+  const parts =
+    extraString.split("&");
+
+  for (const part of parts) {
+
+    if (!part) {
+      continue;
+    }
+
+    const separator =
+      part.indexOf("=");
+
+    if (separator === -1) {
+
+      extra[
+        decodeURIComponent(part)
+      ] = true;
+
+      continue;
+    }
+
+    const key =
+      decodeURIComponent(
+        part.substring(0, separator)
+      );
+
+    const value =
+      decodeURIComponent(
+        part.substring(separator + 1)
+      );
+
+    extra[key] = value;
+  }
+
+  return extra;
+}
+
+// ======================================================
+// TRATAR ROTAS DO STREMIO
+// ======================================================
+
+async function handleStremioRequest(
+  req,
+  res,
+  pathname
+) {
+
+  // ====================================================
+  // MANIFEST
+  // ====================================================
+
+  if (
+    pathname === "/manifest.json" ||
+    pathname === "/manifest"
+  ) {
+
+    return sendJson(
+      res,
+      200,
+      manifest
+    );
+  }
+
+  // ====================================================
+  // CATALOG
+  // ====================================================
+
+  if (
+    pathname.startsWith("/catalog/")
+  ) {
+
+    let route =
+      pathname.substring(
+        "/catalog/".length
+      );
+
+    route =
+      route.replace(/\.json$/, "");
+
+    const parts =
+      route.split("/");
+
+    const type =
+      parts[0]
+        ? decodeURIComponent(parts[0])
+        : null;
+
+    const id =
+      parts[1]
+        ? decodeURIComponent(parts[1])
+        : null;
+
+    const extraString =
+      parts.length > 2
+        ? parts.slice(2).join("/")
+        : "";
+
+    if (!type || !id) {
+
+      return sendJson(
+        res,
+        400,
+        {
+          error:
+            "Rota de catálogo inválida."
+        }
+      );
+    }
 
     try {
 
-      // ==================================================
-      // HEALTH CHECK
-      // ==================================================
+      const result =
+        await sdkInterface.get({
+          resource: "catalog",
+          type,
+          id,
+          extra:
+            parseExtra(extraString)
+        });
 
-      if (
-        req.url === "/health" ||
-        req.url === "/health/"
-      ) {
-
-        res.writeHead(
-          200,
-          {
-            "Content-Type":
-              "application/json; charset=utf-8",
-
-            "Cache-Control":
-              "no-cache"
-          }
-        );
-
-        return res.end(
-          JSON.stringify({
-            status: "ok",
-            service: "stremio-addon",
-            port: PORT,
-            timestamp:
-              new Date().toISOString()
-          })
-        );
-      }
-
-      // ==================================================
-      // PÁGINA PRINCIPAL
-      // ==================================================
-
-      if (
-        req.url === "/" ||
-        req.url === ""
-      ) {
-
-        res.writeHead(
-          200,
-          {
-            "Content-Type":
-              "text/plain; charset=utf-8"
-          }
-        );
-
-        return res.end(
-          "Stremio Addon online."
-        );
-      }
-
-      // ==================================================
-      // PROXY
-      // ==================================================
-
-      if (
-        req.url.startsWith("/proxy")
-      ) {
-
-        let remoteUrl;
-
-        try {
-
-          const requestUrl =
-            new URL(
-              req.url,
-              `http://${req.headers.host}`
-            );
-
-          remoteUrl =
-            requestUrl.searchParams.get(
-              "url"
-            );
-
-        } catch (err) {
-
-          res.writeHead(
-            400,
-            {
-              "Content-Type":
-                "text/plain"
-            }
-          );
-
-          return res.end(
-            "URL de requisicao invalida."
-          );
-        }
-
-        if (!remoteUrl) {
-
-          res.writeHead(
-            400,
-            {
-              "Content-Type":
-                "text/plain"
-            }
-          );
-
-          return res.end(
-            "Parametro URL em falta."
-          );
-        }
-
-        let parsedRemote;
-
-        try {
-
-          parsedRemote =
-            new URL(remoteUrl);
-
-        } catch (err) {
-
-          res.writeHead(
-            400,
-            {
-              "Content-Type":
-                "text/plain"
-            }
-          );
-
-          return res.end(
-            "URL remota invalida."
-          );
-        }
-
-        if (
-          parsedRemote.protocol !== "http:" &&
-          parsedRemote.protocol !== "https:"
-        ) {
-
-          res.writeHead(
-            400,
-            {
-              "Content-Type":
-                "text/plain"
-            }
-          );
-
-          return res.end(
-            "Protocolo nao permitido."
-          );
-        }
-
-        const client =
-          parsedRemote.protocol === "https:"
-            ? https
-            : http;
-
-        const proxyReq =
-          client.request(
-            remoteUrl,
-            {
-              method:
-                req.method || "GET",
-
-              headers: {
-                "User-Agent":
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-
-                "Accept":
-                  req.headers.accept ||
-                  "*/*"
-              },
-
-              timeout: 15000
-            },
-
-            (proxyRes) => {
-
-              const headers = {
-                ...proxyRes.headers,
-
-                "access-control-allow-origin":
-                  "*"
-              };
-
-              res.writeHead(
-                proxyRes.statusCode || 502,
-                headers
-              );
-
-              proxyRes.pipe(res);
-            }
-          );
-
-        proxyReq.on(
-          "timeout",
-          () => {
-
-            console.error(
-              "[PROXY] Timeout"
-            );
-
-            proxyReq.destroy();
-
-            if (!res.headersSent) {
-
-              res.writeHead(
-                504,
-                {
-                  "Content-Type":
-                    "text/plain"
-                }
-              );
-            }
-
-            res.end(
-              "Timeout no servidor remoto."
-            );
-          }
-        );
-
-        proxyReq.on(
-          "error",
-          (err) => {
-
-            console.error(
-              "[PROXY ERROR]:",
-              err.message
-            );
-
-            if (!res.headersSent) {
-
-              res.writeHead(
-                502,
-                {
-                  "Content-Type":
-                    "text/plain"
-                }
-              );
-            }
-
-            res.end(
-              "Erro ao conectar ao servidor remoto."
-            );
-          }
-        );
-
-        req.on(
-          "close",
-          () => {
-
-            if (!proxyReq.destroyed) {
-              proxyReq.destroy();
-            }
-          }
-        );
-
-        req.pipe(proxyReq);
-
-        return;
-      }
-
-      // ==================================================
-      // STREMIO SDK
-      // ==================================================
-
-      sdkInterface(
-        req,
-        res
+      return sendJson(
+        res,
+        200,
+        result || { metas: [] }
       );
 
     } catch (err) {
 
       console.error(
-        "[SERVER ERROR]",
+        "[CATALOG REQUEST ERROR]",
         err
       );
 
-      if (!res.headersSent) {
-
-        res.writeHead(
-          500,
-          {
-            "Content-Type":
-              "text/plain"
-          }
-        );
-      }
-
-      res.end(
-        "Erro interno do servidor."
+      return sendJson(
+        res,
+        500,
+        {
+          metas: [],
+          error:
+            "Erro ao carregar catálogo."
+        }
       );
     }
   }
-);
+
+  // ====================================================
+  // STREAM
+  // ====================================================
+
+  if (
+    pathname.startsWith("/stream/")
+  ) {
+
+    let route =
+      pathname.substring(
+        "/stream/".length
+      );
+
+    route =
+      route.replace(/\.json$/, "");
+
+    const parts =
+      route.split("/");
+
+    const type =
+      parts[0]
+        ? decodeURIComponent(parts[0])
+        : null;
+
+    const id =
+      parts[1]
+        ? decodeURIComponent(parts[1])
+        : null;
+
+    const extraString =
+      parts.length > 2
+        ? parts.slice(2).join("/")
+        : "";
+
+    if (!type || !id) {
+
+      return sendJson(
+        res,
+        400,
+        {
+          streams: []
+        }
+      );
+    }
+
+    try {
+
+      console.log(
+        `[STREMIO] Stream request: ${type}/${id}`
+      );
+
+      const result =
+        await sdkInterface.get({
+          resource: "stream",
+          type,
+          id,
+          extra:
+            parseExtra(extraString)
+        });
+
+      return sendJson(
+        res,
+        200,
+        result || { streams: [] }
+      );
+
+    } catch (err) {
+
+      console.error(
+        "[STREAM REQUEST ERROR]",
+        err
+      );
+
+      return sendJson(
+        res,
+        500,
+        {
+          streams: [],
+          error:
+            "Erro ao carregar stream."
+        }
+      );
+    }
+  }
+
+  return false;
+}
+
+// ======================================================
+// SERVIDOR HTTP
+// ======================================================
+
+const server =
+  http.createServer(
+    async (req, res) => {
+
+      try {
+
+        // =================================================
+        // CORS / OPTIONS
+        // =================================================
+
+        if (req.method === "OPTIONS") {
+
+          res.writeHead(
+            204,
+            {
+              "Access-Control-Allow-Origin":
+                "*",
+
+              "Access-Control-Allow-Methods":
+                "GET, OPTIONS",
+
+              "Access-Control-Allow-Headers":
+                "*"
+            }
+          );
+
+          return res.end();
+        }
+
+        // =================================================
+        // URL
+        // =================================================
+
+        const requestUrl =
+          new URL(
+            req.url || "/",
+            `http://${req.headers.host || "localhost"}`
+          );
+
+        const pathname =
+          requestUrl.pathname;
+
+        // =================================================
+        // HEALTH CHECK
+        // =================================================
+
+        if (
+          pathname === "/health" ||
+          pathname === "/health/"
+        ) {
+
+          return sendJson(
+            res,
+            200,
+            {
+              status: "ok",
+              service: "stremio-addon",
+              port: PORT,
+              timestamp:
+                new Date().toISOString()
+            }
+          );
+        }
+
+        // =================================================
+        // PÁGINA PRINCIPAL
+        // =================================================
+
+        if (
+          pathname === "/" ||
+          pathname === ""
+        ) {
+
+          res.writeHead(
+            200,
+            {
+              "Content-Type":
+                "text/plain; charset=utf-8",
+
+              "Access-Control-Allow-Origin":
+                "*"
+            }
+          );
+
+          return res.end(
+            "Stremio Addon online."
+          );
+        }
+
+        // =================================================
+        // PROXY
+        // =================================================
+
+        if (
+          pathname === "/proxy"
+        ) {
+
+          const remoteUrl =
+            requestUrl.searchParams.get(
+              "url"
+            );
+
+          if (!remoteUrl) {
+
+            res.writeHead(
+              400,
+              {
+                "Content-Type":
+                  "text/plain; charset=utf-8"
+              }
+            );
+
+            return res.end(
+              "Parametro URL em falta."
+            );
+          }
+
+          let parsedRemote;
+
+          try {
+
+            parsedRemote =
+              new URL(remoteUrl);
+
+          } catch (err) {
+
+            res.writeHead(
+              400,
+              {
+                "Content-Type":
+                  "text/plain; charset=utf-8"
+              }
+            );
+
+            return res.end(
+              "URL remota invalida."
+            );
+          }
+
+          if (
+            parsedRemote.protocol !== "http:" &&
+            parsedRemote.protocol !== "https:"
+          ) {
+
+            res.writeHead(
+              400,
+              {
+                "Content-Type":
+                  "text/plain; charset=utf-8"
+              }
+            );
+
+            return res.end(
+              "Protocolo nao permitido."
+            );
+          }
+
+          const client =
+            parsedRemote.protocol === "https:"
+              ? https
+              : http;
+
+          const proxyReq =
+            client.request(
+              remoteUrl,
+              {
+                method:
+                  req.method || "GET",
+
+                headers: {
+                  "User-Agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+
+                  "Accept":
+                    req.headers.accept ||
+                    "*/*"
+                },
+
+                timeout: 15000
+              },
+
+              (proxyRes) => {
+
+                const headers = {
+                  ...proxyRes.headers,
+
+                  "access-control-allow-origin":
+                    "*"
+                };
+
+                res.writeHead(
+                  proxyRes.statusCode || 502,
+                  headers
+                );
+
+                proxyRes.pipe(res);
+              }
+            );
+
+          proxyReq.on(
+            "timeout",
+            () => {
+
+              console.error(
+                "[PROXY] Timeout"
+              );
+
+              proxyReq.destroy();
+
+              if (!res.headersSent) {
+
+                res.writeHead(
+                  504,
+                  {
+                    "Content-Type":
+                      "text/plain; charset=utf-8"
+                  }
+                );
+              }
+
+              res.end(
+                "Timeout no servidor remoto."
+              );
+            }
+          );
+
+          proxyReq.on(
+            "error",
+            (err) => {
+
+              console.error(
+                "[PROXY ERROR]:",
+                err.message
+              );
+
+              if (!res.headersSent) {
+
+                res.writeHead(
+                  502,
+                  {
+                    "Content-Type":
+                      "text/plain; charset=utf-8"
+                  }
+                );
+              }
+
+              res.end(
+                "Erro ao conectar ao servidor remoto."
+              );
+            }
+          );
+
+          req.on(
+            "close",
+            () => {
+
+              if (
+                !proxyReq.destroyed
+              ) {
+
+                proxyReq.destroy();
+              }
+            }
+          );
+
+          req.pipe(proxyReq);
+
+          return;
+        }
+
+        // =================================================
+        // ROTAS DO STREMIO
+        // =================================================
+
+        const handled =
+          await handleStremioRequest(
+            req,
+            res,
+            pathname
+          );
+
+        if (handled !== false) {
+          return;
+        }
+
+        // =================================================
+        // 404
+        // =================================================
+
+        if (!res.headersSent) {
+
+          res.writeHead(
+            404,
+            {
+              "Content-Type":
+                "text/plain; charset=utf-8",
+
+              "Access-Control-Allow-Origin":
+                "*"
+            }
+          );
+
+          res.end(
+            "Not Found"
+          );
+        }
+
+      } catch (err) {
+
+        console.error(
+          "[SERVER ERROR]",
+          err
+        );
+
+        if (!res.headersSent) {
+
+          res.writeHead(
+            500,
+            {
+              "Content-Type":
+                "text/plain; charset=utf-8",
+
+              "Access-Control-Allow-Origin":
+                "*"
+            }
+          );
+        }
+
+        res.end(
+          "Erro interno do servidor."
+        );
+      }
+    }
+  );
 
 // ======================================================
 // ERROS DO SERVIDOR
