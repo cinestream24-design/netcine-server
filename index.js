@@ -41,6 +41,35 @@ const HTTP_HEADERS = {
   'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
 };
 
+// ---------- Extrator de Stream Web (Bypass de Web Players HTML) ----------
+
+async function resolveDirectStreamUrl(webUrl) {
+  try {
+    const res = await axios.get(webUrl, {
+      headers: HTTP_HEADERS,
+      timeout: 6000
+    });
+
+    const html = res.data;
+    if (typeof html !== 'string') return webUrl;
+
+    // Se o retorno já for um manifesto M3U8 nativo
+    if (html.includes('#EXTM3U')) {
+      return webUrl;
+    }
+
+    // Procura por URLs .m3u8 dentro de tags <script> ou parâmetros JavaScript no HTML
+    const match = html.match(/(https?:\/\/[^"'`\s]+\.m3u8[^"'`\s]*)/i);
+    if (match) {
+      return match[1];
+    }
+
+    return webUrl;
+  } catch (err) {
+    console.error(`[NetCine TV] Erro ao extrair stream de ${webUrl}:`, err.message);
+    return webUrl;
+  }
+}
 
 // ---------- Utilidades ----------
 
@@ -216,7 +245,6 @@ function makeItem(rawMagnet, context, postAudio, siteName, requireDnDual = false
   const dn = clean(safeDecode((magnetUrl.match(/[?&]dn=([^&]+)/) || [])[1] || ''));
   const xl = ((rawMagnet || '').match(/[?&](?:amp;)?xl=(\d+)/) || [])[1];
 
-  // Descarta legendado e áudio não informado (Dual x Dublado é decidido pela configuração)
   if (requireDnDual) {
     const a = detectAudio(dn);
     if (!a || a.rank > 1) return null;
@@ -437,7 +465,7 @@ function parseStarckNetPost(html, imdbId) {
     const groupAudio = detectAudio(groupName);
 
     $(group).find('.o-arquivo').each((__, file) => {
-      const $file = $(file);
+      const $file =$(file);
       const magnet = $file.find('a[href^="magnet:"]').first().attr('href');
       if (!magnet) return;
 
@@ -450,8 +478,7 @@ function parseStarckNetPost(html, imdbId) {
     });
   });
 
-  if (items.length === 0 && $('.o-lista').length === 0) {
-    $('a[href^="magnet:"]').each((_, a) => {
+  if (items.length === 0 && $('.o-lista').length === 0) {$('a[href^="magnet:"]').each((_, a) => {
       const context = clean($(a).parent().text());
       add(makeItem($(a).attr('href'), context, null, STARCKNET_NAME));
     });
@@ -521,8 +548,8 @@ async function searchComando(queryTitle) {
       if (href.startsWith('/')) href = COMANDO_URL + href;
       if (!href.startsWith(COMANDO_URL) || href.includes('/?s=')) return;
 
-      const $item = $(elem).closest('article, .post, .entry');
-      const title = clean($(elem).text() || $item.find('h2, .entry-title').text());
+      const $item =$(elem).closest('article, .post, .entry');
+      const title = clean($(elem).text() \vert{}\vert{}$item.find('h2, .entry-title').text());
       const metaText = clean($item.text());
 
       if (!byUrl.has(href)) {
@@ -573,7 +600,7 @@ async function extractComandoMagnets(postUrl, imdbId) {
     }
 
     const $ = cheerio.load(html);
-    const postAudio = detectAudio(clean($('h1').text() + ' ' + $('title').text()));
+    const postAudio = detectAudio(clean($('h1').text() + ' ' +$('title').text()));
     if (postAudio && postAudio.rank === 2) {
       console.log(`[Comando] Post legendado ignorado: ${postUrl}`);
       return [];
@@ -583,8 +610,8 @@ async function extractComandoMagnets(postUrl, imdbId) {
     const seen = new Set();
 
     $('a[href^="magnet:"]').each((_, elem) => {
-      const $a = $(elem);
-      const context = clean([$a.parent().text(), $a.text(), nearestHeading($, $a)].join(' '));
+      const $a =$(elem);
+      const context = clean([$a.parent().text(),$a.text(), nearestHeading($,$a)].join(' '));
 
       const item = makeItem($a.attr('href'), context, postAudio, COMANDO_NAME, true);
       if (!item || seen.has(item.hash)) return;
@@ -619,9 +646,8 @@ async function getFromComando(titles, meta, imdbId) {
 // Verificação de seeds (scrape UDP nos trackers)
 // =====================================================================
 
-// SCRAPE_START
-const SEED_CHECK = process.env.SEED_CHECK !== 'false';   // SEED_CHECK=false desliga
-const HIDE_DEAD = process.env.HIDE_DEAD !== 'false';    // links com 0 seeds são escondidos (HIDE_DEAD=false mostra)
+const SEED_CHECK = process.env.SEED_CHECK !== 'false';
+const HIDE_DEAD = process.env.HIDE_DEAD !== 'false';
 const SCRAPE_TIMEOUT = 3000;
 
 const DEFAULT_TRACKERS = [
@@ -688,7 +714,6 @@ function udpScrape(trackerUrl, hashHex, timeoutMs = SCRAPE_TIMEOUT) {
       }
     });
 
-    // connect request: protocol_id (0x41727101980) + action 0 + transaction_id
     const connReq = Buffer.alloc(16);
     connReq.writeUInt32BE(0x417, 0);
     connReq.writeUInt32BE(0x27101980, 4);
@@ -701,7 +726,6 @@ function udpScrape(trackerUrl, hashHex, timeoutMs = SCRAPE_TIMEOUT) {
 const seedCache = new Map();
 const SEED_CACHE_TTL = 10 * 60 * 1000;
 
-// Retorna o maior número de seeds encontrado, ou null se nenhum tracker respondeu
 async function getSeeders(hash, magnetUrl) {
   if (!hash || hash.length !== 40) return null;
 
@@ -718,10 +742,9 @@ async function getSeeders(hash, magnetUrl) {
   seedCache.set(hash, { seeds, at: Date.now() });
   return seeds;
 }
-// SCRAPE_END
 
 // =====================================================================
-// Fontes: cada uma vira um addon separado, com o nome da própria fonte
+// Fontes e Lista de Canais de TV
 // =====================================================================
 
 const SOURCES = [
@@ -730,8 +753,14 @@ const SOURCES = [
   { key: 'comando', name: COMANDO_NAME, fetch: (titles, meta, imdbId) => getFromComando(titles, meta, imdbId) }
 ];
 
-// Canais de TV ao vivo (adicione outros nesta lista)
 const CANAIS_TV = [
+  {
+    id: 'live_cartoon',
+    name: 'Cartoon Network',
+    poster: 'https://upload.wikimedia.org/wikipedia/commons/thumb/8/80/Cartoon_Network_2010_logo.svg/512px-Cartoon_Network_2010_logo.svg.png',
+    description: 'Transmissão ao vivo do canal Cartoon Network Brasil.',
+    streamUrl: 'https://f8umt2oop68t.sbs/live/secure/pNg6X1D-Uv1PjPbWkIhR9Ks0ylfC6Srn8ShZ0QM5GGw/1791268814/eb617b67a2c99526/cartoonnetwork/index.m3u8'
+  },
   {
     id: 'live_axn',
     name: 'AXN',
@@ -743,14 +772,14 @@ const CANAIS_TV = [
 
 const DEFAULT_CONFIG = {
   sources: SOURCES.map((x) => x.key),
-  audio: 'dual',                      // 'dual' | 'dual+dub'
-  minRes: -1,                         // -1 todas | 1 = 720p+ | 2 = 1080p+ | 4 = só 4K
-  maxRes: -1,                         // -1 sem limite | 1 = até 720p | 2 = até 1080p
-  maxGB: 0,                           // 0 sem limite
-  minSeeds: HIDE_DEAD ? 1 : -1,       // -1 mostra todos (inclusive 0 seeds)
-  sort: 'res',                        // 'res' | 'seeds' | 'size'
-  limit: 0,                           // links por fonte (0 = todos)
-  showFile: true                      // mostra o nome do arquivo no card
+  audio: 'dual',
+  minRes: -1,
+  maxRes: -1,
+  maxGB: 0,
+  minSeeds: HIDE_DEAD ? 1 : -1,
+  sort: 'res',
+  limit: 0,
+  showFile: true
 };
 
 function parseConfig(b64) {
@@ -779,7 +808,6 @@ function parseConfig(b64) {
   }
 }
 
-// Addon único: junta as fontes escolhidas (manifest na raiz)
 const ALL_SOURCE = {
   key: 'all',
   name: 'Victor / NetStream',
@@ -802,7 +830,6 @@ function buildManifest(src) {
     catalogs: [],
     behaviorHints: { configurable: true }
   };
-  // Só o addon principal (raiz) traz a TV ao vivo
   if (src.key === 'all') {
     manifest.description = 'Filmes em Dual Áudio e canais de TV ao vivo';
     manifest.resources = ['catalog', 'meta', 'stream'];
@@ -816,7 +843,6 @@ function buildManifest(src) {
 const manifests = {};
 for (const src of [...SOURCES, ALL_SOURCE]) manifests[src.key] = buildManifest(src);
 
-// Cache do TMDB (os 3 addons pedem o mesmo filme ao mesmo tempo)
 const metaCache = new Map();
 function getMeta(imdbId) {
   const c = metaCache.get(imdbId);
@@ -852,7 +878,6 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
     console.error(`[${src.name}] Erro inesperado:`, err.message);
   }
 
-  // Remover duplicados por hash
   let unique = [];
   const seenHashes = new Set();
   for (const item of items) {
@@ -862,13 +887,11 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
     }
   }
 
-  // Filtros da configuração: tipo de áudio e qualidade mínima
   unique = unique.filter((i) => (cfg.audio === 'dual' ? i.audioRank === 0 : i.audioRank <= 1));
   if (cfg.minRes >= 0) unique = unique.filter((i) => i.resRank >= cfg.minRes);
   if (cfg.maxRes >= 0) unique = unique.filter((i) => i.resRank <= cfg.maxRes);
   if (cfg.maxGB > 0) unique = unique.filter((i) => !i.sizeBytes || i.sizeBytes <= cfg.maxGB * 1024 ** 3);
 
-  // Verifica seeds em paralelo e marca no título de cada link
   if (SEED_CHECK) {
     await Promise.all(unique.map(async (item) => {
       try {
@@ -888,7 +911,6 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
     finalItems = unique.filter((i) => i.seeds === null || i.seeds === undefined || i.seeds >= cfg.minSeeds);
   }
 
-  // Ordenar: agrupa por fonte; dentro dela, sem seeds por último, áudio e critério escolhido
   const SOURCE_ORDER = SOURCES.map((x) => x.name);
   const sourceRank = (i) => {
     const idx = SOURCE_ORDER.indexOf(i.source);
@@ -915,7 +937,6 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
     });
   }
 
-  // Nome em negrito: Título do filme em PT-BR | qualidade
   const streams = finalItems.map((item) => {
     const out = { ...item.stream, name: `${meta.title}${item.res ? ' | ' + item.res : ''}` };
     if (!cfg.showFile) out.title = out.title.split('\n').filter((l) => !l.startsWith('📄')).join('\n');
@@ -930,7 +951,7 @@ async function handleStream(src, imdbId, cfg = DEFAULT_CONFIG) {
 }
 
 // =====================================================================
-// Servidor HTTP (protocolo de addon do Stremio / Nuvio)
+// Servidor HTTP
 // =====================================================================
 
 const CORS_HEADERS = {
@@ -942,10 +963,6 @@ const CORS_HEADERS = {
 function sendJson(res, status, obj) {
   res.writeHead(status, { ...CORS_HEADERS, 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
-}
-
-function esc(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 const LANDING_HTML = String.raw`<!doctype html>
@@ -988,15 +1005,15 @@ ol{margin:0;padding-left:20px;color:var(--mut);font-size:13px}
 </style></head><body><main>
 <div class="hd">
 <svg class="logo" viewBox="0 0 48 48" aria-hidden="true"><rect width="48" height="48" rx="12" fill="#e5b53a"/><path d="M18 13l17 11-17 11z" fill="#1a1400"/><path d="M9 20c2 2 2 6 0 8" stroke="#1a1400" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
-<div><h1>Victor / NetStream</h1><p class="sub">Filmes em Dual Áudio direto no seu app</p></div>
+<div><h1>Victor / NetStream</h1><p class="sub">Filmes em Dual Áudio e TV ao vivo</p></div>
 </div>
-<div class="tags"><span>Dual Áudio</span><span>PT-BR</span><span>Checa seeds</span><span>3 fontes</span></div>
+<div class="tags"><span>Dual Áudio</span><span>PT-BR</span><span>TV Ao Vivo</span><span>Checa seeds</span></div>
 <div id="app"></div>
 <a id="install" class="btn pri" href="#">Instalar</a>
 <button id="copy" class="btn gh" type="button">Copiar link</button>
 <code id="url"></code>
 <div class="cd" style="margin-top:18px"><div class="lb">Como instalar</div>
-<ol><li>Toque em Instalar, ou copie o link.</li><li>No app, abra Addons e cole o link.</li><li>Abra um filme e escolha o link na lista.</li></ol></div>
+<ol><li>Toque em Instalar, ou copie o link.</li><li>No app, abra Addons e cole o link.</li><li>Abra um filme ou canal e divirta-se.</li></ol></div>
 </main>
 <script>
 var SRC = [['starck', 'Starck Filmes', 'S', '#3b82f6'], ['starcknet', 'StarckFilmesNet', 'SN', '#8b5cf6'], ['comando', 'Comando Torrents', 'C', '#ef4444']];
@@ -1118,7 +1135,16 @@ const server = http.createServer(async (req, res) => {
       const id = decodeURIComponent(sm[2]);
       if (type === 'tv' && src.key === 'all') {
         const ch = CANAIS_TV.find((c) => c.id === id);
-        const streams = ch ? [{ title: `📺 ${ch.name}\n🌐 Transmissão Ao Vivo (HD)`, externalUrl: ch.streamUrl }] : [];
+        if (!ch) return sendJson(res, 200, { streams: [] });
+
+        // Extrai a URL M3U8 nativa caso o canal seja um Web Player encapsulado
+        const directUrl = await resolveDirectStreamUrl(ch.streamUrl);
+
+        // Usamos 'url' em vez de 'externalUrl' para forçar a reprodução interna
+        const streams = [{
+          title: `📺 ${ch.name}\n🌐 Transmissão Ao Vivo (HD)`,
+          url: directUrl
+        }];
         return sendJson(res, 200, { streams });
       }
       if (type !== 'movie') return sendJson(res, 200, { streams: [] });
