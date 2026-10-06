@@ -1,13 +1,16 @@
 {
   "name": "netcine-server",
-  "version": "2.2.1",
-  "description": "Stremio Addon Server",
+  "version": "2.3.0",
+  "description": "NetCine Server",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "axios": "^1.7.0",
-    "stremio-addon-sdk": "^1.6.0"
+    "express": "^4.21.2",
+    "playwright": "^1.55.0"
   }
 }
