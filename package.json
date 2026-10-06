@@ -1,11 +1,11 @@
 {
   "name": "netcine-server",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "NetCine Server",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "postinstall": "npx playwright install chromium"
+    "postinstall": "npx playwright install --with-deps chromium"
   },
   "engines": {
     "node": ">=20"
