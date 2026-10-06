@@ -16,7 +16,7 @@ const API_REFERER = "https://reidoscanais.st/";
 
 const manifest = {
   id: "org.reidoscanais.stremio",
-  version: "1.0.2",
+  version: "1.0.3",
   name: "Rei dos Canais Addon",
   description: "Canais ao vivo do Rei dos Canais",
 
@@ -57,9 +57,6 @@ async function getChannels() {
 
   const data = response.data;
 
-  // A API atual retorna:
-  // { success: true, data: [...] }
-
   if (Array.isArray(data)) {
     return data;
   }
@@ -76,7 +73,7 @@ async function getChannels() {
 }
 
 /* =========================================================
-   PEGAR ID DO CANAL
+   ID DO CANAL
    ========================================================= */
 
 function getChannelId(channel, index) {
@@ -90,7 +87,7 @@ function getChannelId(channel, index) {
 }
 
 /* =========================================================
-   PEGAR NOME DO CANAL
+   NOME DO CANAL
    ========================================================= */
 
 function getChannelName(channel, index) {
@@ -103,7 +100,7 @@ function getChannelName(channel, index) {
 }
 
 /* =========================================================
-   PEGAR LOGO
+   LOGO DO CANAL
    ========================================================= */
 
 function getChannelPoster(channel) {
@@ -131,18 +128,9 @@ builder.defineCatalogHandler(async (args) => {
     const channels = await getChannels();
 
     const metas = channels.map((channel, index) => {
-      const id = getChannelId(
-        channel,
-        index
-      );
-
-      const name = getChannelName(
-        channel,
-        index
-      );
-
-      const poster =
-        getChannelPoster(channel);
+      const id = getChannelId(channel, index);
+      const name = getChannelName(channel, index);
+      const poster = getChannelPoster(channel);
 
       const meta = {
         id,
@@ -193,10 +181,6 @@ builder.defineMetaHandler(async (args) => {
     const channelId = args.id;
 
     if (!channelId) {
-      console.log(
-        "[META] ID não informado"
-      );
-
       return {
         meta: null
       };
@@ -204,14 +188,10 @@ builder.defineMetaHandler(async (args) => {
 
     const channels = await getChannels();
 
-    const channelIndex =
-      channels.findIndex(
-        (channel, index) =>
-          getChannelId(
-            channel,
-            index
-          ) === String(channelId)
-      );
+    const channelIndex = channels.findIndex(
+      (channel, index) =>
+        getChannelId(channel, index) === String(channelId)
+    );
 
     if (channelIndex === -1) {
       console.log(
@@ -228,17 +208,14 @@ builder.defineMetaHandler(async (args) => {
       };
     }
 
-    const channel =
-      channels[channelIndex];
+    const channel = channels[channelIndex];
 
-    const name =
-      getChannelName(
-        channel,
-        channelIndex
-      );
+    const name = getChannelName(
+      channel,
+      channelIndex
+    );
 
-    const poster =
-      getChannelPoster(channel);
+    const poster = getChannelPoster(channel);
 
     const meta = {
       id: String(channelId),
@@ -251,8 +228,9 @@ builder.defineMetaHandler(async (args) => {
     }
 
     if (channel.description) {
-      meta.description =
-        String(channel.description);
+      meta.description = String(
+        channel.description
+      );
     }
 
     console.log(
@@ -300,23 +278,12 @@ builder.defineStreamHandler(async (args) => {
       };
     }
 
-    /*
-     * A API não possui /stream/{id}.
-     *
-     * O endpoint /channels já retorna os
-     * embeds de cada canal.
-     */
-
     const channels = await getChannels();
 
-    const channelIndex =
-      channels.findIndex(
-        (channel, index) =>
-          getChannelId(
-            channel,
-            index
-          ) === String(channelId)
-      );
+    const channelIndex = channels.findIndex(
+      (channel, index) =>
+        getChannelId(channel, index) === String(channelId)
+    );
 
     if (channelIndex === -1) {
       console.log(
@@ -329,13 +296,11 @@ builder.defineStreamHandler(async (args) => {
       };
     }
 
-    const channel =
-      channels[channelIndex];
+    const channel = channels[channelIndex];
 
-    const embeds =
-      Array.isArray(channel.embeds)
-        ? channel.embeds
-        : [];
+    const embeds = Array.isArray(channel.embeds)
+      ? channel.embeds
+      : [];
 
     console.log(
       "[STREAM] Embeds encontrados:",
@@ -367,6 +332,12 @@ builder.defineStreamHandler(async (args) => {
         embed.url ??
         embed.src ??
         null;
+
+      /* MOSTRA A URL NO LOG DO RAILWAY */
+      console.log(
+        "[STREAM URL]",
+        embedUrl
+      );
 
       if (
         !embedUrl ||
@@ -426,7 +397,7 @@ const addonRouter =
   getRouter(addonInterface);
 
 /* =========================================================
-   SERVIDOR HTTP
+   SERVIDOR
    ========================================================= */
 
 const server = http.createServer(
@@ -437,9 +408,7 @@ const server = http.createServer(
       `http://${req.headers.host || "localhost"}`
     );
 
-    /* =========================
-       HEALTH
-       ========================= */
+    /* HEALTH */
 
     if (
       requestUrl.pathname === "/health"
@@ -462,9 +431,7 @@ const server = http.createServer(
       return;
     }
 
-    /* =========================
-       HOME
-       ========================= */
+    /* HOME */
 
     if (
       requestUrl.pathname === "/"
@@ -483,9 +450,7 @@ const server = http.createServer(
       return;
     }
 
-    /* =========================
-       STREMIO ROUTER
-       ========================= */
+    /* STREMIO */
 
     try {
 
@@ -495,21 +460,16 @@ const server = http.createServer(
         (error) => {
 
           if (error) {
-
             console.error(
               "[ROUTER ERROR]",
               error
             );
 
             if (!res.headersSent) {
-
-              res.writeHead(
-                500,
-                {
-                  "Content-Type":
-                    "application/json; charset=utf-8"
-                }
-              );
+              res.writeHead(500, {
+                "Content-Type":
+                  "application/json; charset=utf-8"
+              });
 
               res.end(
                 JSON.stringify({
@@ -523,14 +483,10 @@ const server = http.createServer(
           }
 
           if (!res.headersSent) {
-
-            res.writeHead(
-              404,
-              {
-                "Content-Type":
-                  "application/json; charset=utf-8"
-              }
-            );
+            res.writeHead(404, {
+              "Content-Type":
+                "application/json; charset=utf-8"
+            });
 
             res.end(
               JSON.stringify({
@@ -549,14 +505,10 @@ const server = http.createServer(
       );
 
       if (!res.headersSent) {
-
-        res.writeHead(
-          500,
-          {
-            "Content-Type":
-              "application/json; charset=utf-8"
-          }
-        );
+        res.writeHead(500, {
+          "Content-Type":
+            "application/json; charset=utf-8"
+        });
 
         res.end(
           JSON.stringify({
@@ -570,7 +522,7 @@ const server = http.createServer(
 );
 
 /* =========================================================
-   INICIAR SERVIDOR
+   INICIAR
    ========================================================= */
 
 server.listen(
