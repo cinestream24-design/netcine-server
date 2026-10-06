@@ -1,16 +1,12 @@
 {
   "name": "netcine-server",
   "version": "2.2.1",
-  "description": "Addon Stremio/Nuvio - filmes em Dual Áudio e TV ao vivo",
+  "description": "Stremio Addon Server",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
   "dependencies": {
-    "axios": "^1.7.0",
-    "cheerio": "1.0.0-rc.12"
+    "stremio-addon-sdk": "^1.6.0"
   }
 }
