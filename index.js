@@ -20,10 +20,6 @@ let channelsCacheTime = 0;
 
 const CACHE_TIME = 5 * 60 * 1000;
 
-// ============================================================
-// BROWSER
-// ============================================================
-
 async function getBrowser() {
   if (browser && browser.isConnected()) {
     return browser;
@@ -35,7 +31,6 @@ async function getBrowser() {
 
   browserPromise = chromium.launch({
     headless: true,
-
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -72,44 +67,29 @@ async function getBrowser() {
   }
 }
 
-// ============================================================
-// NORMALIZAÇÃO DE URL
-// ============================================================
-
 function normalizeUrl(url) {
-  if (!url || typeof url !== "string") {
-    return null;
-  }
+  if (!url || typeof url !== "string") return null;
 
   url = url.trim();
 
-  if (!url) {
-    return null;
-  }
+  if (!url) return null;
 
   return url;
 }
 
-// ============================================================
-// EXTRAÇÃO DE URLS
-// ============================================================
-
 function extractUrlsFromValue(value, output = []) {
-  if (!value) {
-    return output;
-  }
+  if (!value) return output;
 
   if (typeof value === "string") {
-    const matches = value.match(
-      /https?:\/\/[^\s"'<>\\]+/gi
-    );
+    const matches = value.match(/https?:\/\/[^\s"'<>\\]+/gi);
 
     if (matches) {
       for (const url of matches) {
         const clean = url
           .replace(/\\u0026/g, "&")
           .replace(/\\u003d/g, "=")
-          .replace(/\\\//g, "/");
+          .replace(/\\\//g, "/")
+          .replace(/&amp;/g, "&");
 
         if (!output.includes(clean)) {
           output.push(clean);
@@ -154,17 +134,14 @@ function isHLS(url) {
   );
 }
 
-// ============================================================
-// API DOS CANAIS
-// ============================================================
+/* =========================================================
+   API
+========================================================= */
 
 async function getChannels() {
   const now = Date.now();
 
-  if (
-    channelsCache &&
-    now - channelsCacheTime < CACHE_TIME
-  ) {
+  if (channelsCache && now - channelsCacheTime < CACHE_TIME) {
     return channelsCache;
   }
 
@@ -172,7 +149,6 @@ async function getChannels() {
 
   const response = await fetch(`${API_BASE}/channels`, {
     method: "GET",
-
     headers: {
       Accept: "application/json",
       Referer: API_REFERER,
@@ -182,12 +158,15 @@ async function getChannels() {
   });
 
   if (!response.ok) {
-    throw new Error(
-      `API retornou HTTP ${response.status}`
-    );
+    throw new Error(`API retornou HTTP ${response.status}`);
   }
 
   const json = await response.json();
+
+  console.log(
+    "API channels: objeto com chaves:",
+    Object.keys(json).join(", ")
+  );
 
   let channels = [];
 
@@ -203,24 +182,13 @@ async function getChannels() {
     channels = json.results;
   }
 
-  console.log(
-    "API channels: objeto com chaves:",
-    Object.keys(json).join(", ")
-  );
-
-  console.log(
-    `Canais recebidos: ${channels.length}`
-  );
+  console.log(`Canais recebidos: ${channels.length}`);
 
   channelsCache = channels;
   channelsCacheTime = now;
 
   return channels;
 }
-
-// ============================================================
-// DADOS DO CANAL
-// ============================================================
 
 function getChannelId(channel) {
   return String(
@@ -262,28 +230,86 @@ function getChannelDescription(channel) {
   );
 }
 
+/*
+ * Aqui está a principal alteração.
+ *
+ * Aceitamos várias estruturas possíveis de embeds.
+ */
+
 function getEmbeds(channel) {
-  const embeds =
-    channel.embeds ||
-    channel.embed ||
-    channel.urls ||
-    channel.url ||
+  const possible =
+    channel.embeds ??
+    channel.embed ??
+    channel.urls ??
+    channel.url ??
+    channel.streams ??
+    channel.players ??
+    channel.sources ??
     [];
 
-  if (Array.isArray(embeds)) {
-    return embeds.filter(Boolean);
+  if (Array.isArray(possible)) {
+    return possible.filter(Boolean);
   }
 
-  if (typeof embeds === "string") {
-    return [embeds];
+  if (typeof possible === "string") {
+    return [possible];
+  }
+
+  if (possible && typeof possible === "object") {
+    return [possible];
   }
 
   return [];
 }
 
-// ============================================================
-// ENCONTRAR CANAL
-// ============================================================
+function extractEmbedUrl(embed) {
+  if (!embed) {
+    return null;
+  }
+
+  if (typeof embed === "string") {
+    return normalizeUrl(embed);
+  }
+
+  if (typeof embed === "object") {
+    const candidates = [
+      embed.url,
+      embed.src,
+      embed.link,
+      embed.href,
+      embed.embed,
+      embed.embed_url,
+      embed.embedUrl,
+      embed.player,
+      embed.player_url,
+      embed.playerUrl,
+      embed.page,
+      embed.page_url,
+      embed.pageUrl,
+      embed.website,
+      embed.address
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return normalizeUrl(candidate);
+      }
+    }
+
+    /*
+     * Última tentativa:
+     * procura qualquer URL dentro do objeto inteiro.
+     */
+
+    const urls = extractUrlsFromValue(embed);
+
+    if (urls.length > 0) {
+      return normalizeUrl(urls[0]);
+    }
+  }
+
+  return null;
+}
 
 async function findChannel(id) {
   const channels = await getChannels();
@@ -292,8 +318,7 @@ async function findChannel(id) {
 
   return (
     channels.find(
-      channel =>
-        getChannelId(channel) === target
+      channel => getChannelId(channel) === target
     ) ||
     channels.find(
       channel =>
@@ -306,9 +331,9 @@ async function findChannel(id) {
   );
 }
 
-// ============================================================
-// RESOLVER HLS
-// ============================================================
+/* =========================================================
+   RESOLVER HLS
+========================================================= */
 
 async function resolveHLS(pageUrl) {
   const browser = await getBrowser();
@@ -361,9 +386,7 @@ async function resolveHLS(pageUrl) {
     return true;
   }
 
-  // ----------------------------------------------------------
-  // REQUEST
-  // ----------------------------------------------------------
+  /* REQUEST */
 
   page.on("request", request => {
     try {
@@ -375,9 +398,7 @@ async function resolveHLS(pageUrl) {
     } catch (_) {}
   });
 
-  // ----------------------------------------------------------
-  // RESPONSE
-  // ----------------------------------------------------------
+  /* RESPONSE */
 
   page.on("response", response => {
     try {
@@ -394,12 +415,32 @@ async function resolveHLS(pageUrl) {
       ) {
         registerUrl(url, "RESPONSE");
       }
+
+      /*
+       * Mostra recursos HTTP com erro.
+       */
+
+      if (response.status() >= 400) {
+        console.log(
+          `HTTP ${response.status()}: ${url}`
+        );
+      }
     } catch (_) {}
   });
 
-  // ----------------------------------------------------------
-  // LOG DE ERROS
-  // ----------------------------------------------------------
+  /* REQUEST FAILED */
+
+  page.on("requestfailed", request => {
+    try {
+      console.log(
+        "REQUEST FAILED:",
+        request.url(),
+        request.failure()?.errorText || ""
+      );
+    } catch (_) {}
+  });
+
+  /* CONSOLE */
 
   page.on("console", message => {
     try {
@@ -409,6 +450,8 @@ async function resolveHLS(pageUrl) {
     } catch (_) {}
   });
 
+  /* PAGE ERROR */
+
   page.on("pageerror", error => {
     console.log(
       "PAGEERROR:",
@@ -416,9 +459,7 @@ async function resolveHLS(pageUrl) {
     );
   });
 
-  // ----------------------------------------------------------
-  // POPUPS
-  // ----------------------------------------------------------
+  /* POPUP */
 
   page.on("popup", popup => {
     console.log(
@@ -469,15 +510,11 @@ async function resolveHLS(pageUrl) {
       page.url()
     );
 
-    // --------------------------------------------------------
-    // ESPERA INICIAL
-    // --------------------------------------------------------
-
     await page.waitForTimeout(3000);
 
-    // --------------------------------------------------------
-    // STREAM_URLS
-    // --------------------------------------------------------
+    /* =====================================================
+       STREAM_URLS
+    ===================================================== */
 
     try {
       const streamUrls =
@@ -496,14 +533,13 @@ async function resolveHLS(pageUrl) {
       );
 
       const urls =
-        extractUrlsFromValue(
-          streamUrls
-        );
+        extractUrlsFromValue(streamUrls);
 
       for (const url of urls) {
-        if (registerUrl(url, "STREAM_URLS")) {
-          break;
-        }
+        registerUrl(
+          url,
+          "STREAM_URLS"
+        );
       }
     } catch (error) {
       console.log(
@@ -512,12 +548,18 @@ async function resolveHLS(pageUrl) {
       );
     }
 
-    // --------------------------------------------------------
-    // INSPECIONAR HTML
-    // --------------------------------------------------------
+    /* =====================================================
+       HTML
+    ===================================================== */
 
     try {
       const html = await page.content();
+
+      console.log(
+        "HTML recebido:",
+        html.length,
+        "bytes"
+      );
 
       const htmlUrls =
         extractUrlsFromValue(html);
@@ -528,11 +570,94 @@ async function resolveHLS(pageUrl) {
           "HTML"
         );
       }
-    } catch (_) {}
 
-    // --------------------------------------------------------
-    // FRAMES
-    // --------------------------------------------------------
+      /*
+       * Procura diretamente por m3u8 no HTML.
+       */
+
+      if (
+        html.toLowerCase().includes(".m3u8")
+      ) {
+        console.log(
+          "ATENÇÃO: HTML contém referência a .m3u8"
+        );
+      }
+    } catch (error) {
+      console.log(
+        "Erro lendo HTML:",
+        error.message
+      );
+    }
+
+    /* =====================================================
+       INSPEÇÃO DA PÁGINA
+    ===================================================== */
+
+    try {
+      const info =
+        await page.evaluate(() => {
+          return {
+            title: document.title,
+
+            url: location.href,
+
+            scripts:
+              Array.from(
+                document.scripts
+              ).map(s => s.src || "[inline]"),
+
+            iframes:
+              Array.from(
+                document.querySelectorAll("iframe")
+              ).map(f => f.src || ""),
+
+            videos:
+              Array.from(
+                document.querySelectorAll("video")
+              ).map(v => ({
+                src: v.src || "",
+                currentSrc: v.currentSrc || ""
+              })),
+
+            streamUrls:
+              window.STREAM_URLS || null
+          };
+        });
+
+      console.log(
+        "TÍTULO:",
+        info.title
+      );
+
+      console.log(
+        "SCRIPTS:",
+        JSON.stringify(info.scripts)
+      );
+
+      console.log(
+        "IFRAMES:",
+        JSON.stringify(info.iframes)
+      );
+
+      console.log(
+        "VIDEOS:",
+        JSON.stringify(info.videos)
+      );
+
+      console.log(
+        "STREAM GLOBAL:",
+        JSON.stringify(info.streamUrls)
+      );
+    } catch (error) {
+      console.log(
+        "Erro inspeção página:",
+        error.message
+      );
+    }
+
+    /* =====================================================
+       FRAMES
+    ===================================================== */
 
     console.log(
       `Frames encontrados: ${page.frames().length}`
@@ -545,32 +670,26 @@ async function resolveHLS(pageUrl) {
           frame.url()
         );
 
-        const frameUrls =
+        const frameData =
           await frame.evaluate(() => {
-            const result = [];
+            return {
+              url: location.href,
 
-            if (
-              Array.isArray(
-                window.STREAM_URLS
-              )
-            ) {
-              result.push(
-                ...window.STREAM_URLS
-              );
-            }
+              streamUrls:
+                window.STREAM_URLS ||
+                window.streamUrls ||
+                window.STREAMS ||
+                [],
 
-            const html =
-              document.documentElement
-                ?.outerHTML || "";
-
-            result.push(html);
-
-            return result;
+              html:
+                document.documentElement
+                  ?.outerHTML || ""
+            };
           });
 
         const urls =
           extractUrlsFromValue(
-            frameUrls
+            frameData
           );
 
         for (const url of urls) {
@@ -587,21 +706,23 @@ async function resolveHLS(pageUrl) {
       }
     }
 
-    // --------------------------------------------------------
-    // SE AINDA NÃO ACHOU, ESPERA MAIS
-    // --------------------------------------------------------
+    /* =====================================================
+       ESPERA
+    ===================================================== */
 
     if (found.length === 0) {
       console.log(
         "Nenhum HLS ainda. Aguardando player..."
       );
 
-      await page.waitForTimeout(7000);
+      await page.waitForTimeout(
+        10000
+      );
     }
 
-    // --------------------------------------------------------
-    // STREAM_URLS NOVAMENTE
-    // --------------------------------------------------------
+    /* =====================================================
+       SEGUNDA VERIFICAÇÃO
+    ===================================================== */
 
     if (found.length === 0) {
       try {
@@ -634,9 +755,9 @@ async function resolveHLS(pageUrl) {
       } catch (_) {}
     }
 
-    // --------------------------------------------------------
-    // FRAMES NOVAMENTE
-    // --------------------------------------------------------
+    /* =====================================================
+       TERCEIRA VERIFICAÇÃO DOS FRAMES
+    ===================================================== */
 
     if (found.length === 0) {
       for (const frame of page.frames()) {
@@ -645,8 +766,13 @@ async function resolveHLS(pageUrl) {
             await frame.evaluate(() => {
               return {
                 url: location.href,
+
                 streamUrls:
-                  window.STREAM_URLS || [],
+                  window.STREAM_URLS ||
+                  window.streamUrls ||
+                  window.STREAMS ||
+                  [],
+
                 html:
                   document.documentElement
                     ?.outerHTML || ""
@@ -668,9 +794,9 @@ async function resolveHLS(pageUrl) {
       }
     }
 
-    // --------------------------------------------------------
-    // RESULTADO
-    // --------------------------------------------------------
+    /* =====================================================
+       RESULTADO
+    ===================================================== */
 
     if (found.length > 0) {
       console.log(
@@ -678,7 +804,8 @@ async function resolveHLS(pageUrl) {
       );
 
       console.log(
-        `HLS FINAL ENCONTRADO: ${found[0]}`
+        "HLS FINAL ENCONTRADO:",
+        found[0]
       );
 
       console.log(
@@ -701,9 +828,9 @@ async function resolveHLS(pageUrl) {
   }
 }
 
-// ============================================================
-// HEALTH
-// ============================================================
+/* =========================================================
+   HEALTH
+========================================================= */
 
 app.get("/health", (req, res) => {
   res.json({
@@ -712,14 +839,14 @@ app.get("/health", (req, res) => {
   });
 });
 
-// ============================================================
-// MANIFEST
-// ============================================================
+/* =========================================================
+   MANIFEST
+========================================================= */
 
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "netcine.server",
-    version: "2.6.0",
+    version: "2.7.0",
     name: "NetCine",
     description: "Canais de TV ao vivo",
     logo: "https://cdn.reidoscanais.st/imagens/logo.png",
@@ -751,9 +878,9 @@ app.get("/manifest.json", (req, res) => {
   });
 });
 
-// ============================================================
-// CATALOG
-// ============================================================
+/* =========================================================
+   CATALOG
+========================================================= */
 
 app.get(
   "/catalog/tv/netcine.json",
@@ -766,22 +893,24 @@ app.get(
         `Montando catálogo com ${channels.length} canais`
       );
 
-      const metas = channels.map(channel => {
-        const id =
-          getChannelId(channel);
+      const metas =
+        channels.map(channel => ({
+          id: getChannelId(channel),
 
-        return {
-          id,
           type: "tv",
+
           name:
             getChannelName(channel),
+
           poster:
             getChannelLogo(channel),
-          posterShape: "landscape",
+
+          posterShape:
+            "landscape",
+
           description:
             getChannelDescription(channel)
-        };
-      });
+        }));
 
       console.log(
         `Catálogo final: ${metas.length} canais`
@@ -805,9 +934,9 @@ app.get(
   }
 );
 
-// ============================================================
-// META
-// ============================================================
+/* =========================================================
+   META
+========================================================= */
 
 app.get(
   "/meta/tv/:id.json",
@@ -837,7 +966,8 @@ app.get(
           poster:
             getChannelLogo(channel),
 
-          posterShape: "landscape",
+          posterShape:
+            "landscape",
 
           description:
             getChannelDescription(channel)
@@ -858,9 +988,9 @@ app.get(
   }
 );
 
-// ============================================================
-// STREAM
-// ============================================================
+/* =========================================================
+   STREAM
+========================================================= */
 
 app.get(
   "/stream/tv/:id.json",
@@ -902,23 +1032,64 @@ app.get(
         `Canal ${id}: ${embeds.length} embeds`
       );
 
+      /*
+       * IMPORTANTE:
+       * mostra exatamente o que a API entregou.
+       */
+
+      console.log(
+        "EMBEDS RAW:",
+        JSON.stringify(
+          embeds,
+          null,
+          2
+        )
+      );
+
       if (embeds.length === 0) {
+        console.log(
+          "Nenhum embed encontrado."
+        );
+
         return res.json({
           streams: []
         });
       }
 
-      for (const embed of embeds) {
+      for (
+        let i = 0;
+        i < embeds.length;
+        i++
+      ) {
+        const embed =
+          embeds[i];
+
+        console.log(
+          `Processando embed ${i + 1}/${embeds.length}`
+        );
+
+        console.log(
+          "Embed:",
+          JSON.stringify(
+            embed,
+            null,
+            2
+          )
+        );
+
         const url =
-          normalizeUrl(
-            typeof embed === "string"
-              ? embed
-              : embed.url ||
-                embed.src ||
-                embed.link
-          );
+          extractEmbedUrl(embed);
+
+        console.log(
+          "URL extraída do embed:",
+          url
+        );
 
         if (!url) {
+          console.log(
+            "Não foi possível extrair URL deste embed."
+          );
+
           continue;
         }
 
@@ -973,11 +1144,15 @@ app.get(
 
         } catch (error) {
           console.error(
-            "Erro no stream:",
-            error
+            "Erro no resolver:",
+            error.message
           );
         }
       }
+
+      console.log(
+        "Nenhum stream pôde ser resolvido."
+      );
 
       return res.json({
         streams: []
@@ -997,21 +1172,22 @@ app.get(
   }
 );
 
-// ============================================================
-// FALLBACK
-// ============================================================
+/* =========================================================
+   404
+========================================================= */
 
 app.use(
   (req, res) => {
     res.status(404).json({
-      error: "Endpoint não encontrado"
+      error:
+        "Endpoint não encontrado"
     });
   }
 );
 
-// ============================================================
-// START
-// ============================================================
+/* =========================================================
+   START
+========================================================= */
 
 app.listen(
   PORT,
