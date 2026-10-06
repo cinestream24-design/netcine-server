@@ -4,8 +4,7 @@
   "description": "NetCine Server",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "postinstall": "npx playwright install --with-deps chromium"
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=20"
